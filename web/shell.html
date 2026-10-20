@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Poker Trainer</title>
+<meta name="description" content="Texas Hold'em and Omaha against Easy, Medium and Hard bots, with a strategy coach. Written in C with raylib, compiled to WebAssembly.">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0e161e; }
+  canvas { display: block; position: fixed; left: 0; top: 0; width: 100%; height: 100%; outline: none; }
+  #status {
+    position: fixed; inset: 0; display: flex; flex-direction: column; gap: 14px;
+    align-items: center; justify-content: center;
+    color: #e2e6ec; font: 16px system-ui, -apple-system, sans-serif;
+  }
+  #bar { width: 240px; height: 6px; border-radius: 3px; background: #22303c; overflow: hidden; }
+  #fill { width: 0; height: 100%; background: #f0c446; transition: width .2s; }
+</style>
+</head>
+<body>
+<canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
+<div id="status">
+  <div id="msg">Loading Poker Trainer…</div>
+  <div id="bar"><div id="fill"></div></div>
+</div>
+<script>
+  var statusEl = document.getElementById('status');
+  var msgEl = document.getElementById('msg');
+  var fillEl = document.getElementById('fill');
+  var Module = {
+    canvas: document.getElementById('canvas'),
+    setStatus: function (text) {
+      var m = text.match(/\((\d+(\.\d+)?)\/(\d+)\)/);
+      if (m) fillEl.style.width = (100 * m[1] / m[3]) + '%';
+    },
+    onRuntimeInitialized: function () {
+      statusEl.style.display = 'none';
+      Module.canvas.focus();
+    },
+  };
+  function fail() {
+    statusEl.style.display = 'flex';
+    msgEl.textContent = 'Poker Trainer could not start in this browser (it needs WebGL and WebAssembly).';
+  }
+  window.onerror = fail;
+  // A failed download of index.wasm / index.data aborts through a rejected promise,
+  // which window.onerror never sees; without this the loading bar would hang forever.
+  Module.onAbort = fail;
+  window.addEventListener('unhandledrejection', fail);
+  // Keep keyboard shortcuts going to the game after a click (also inside an iframe)
+  Module.canvas.addEventListener('mousedown', function () { Module.canvas.focus(); });
+  // Don't let the arrow keys (bet sizing) scroll a parent page when embedded.
+  // Space is left alone: blocking it would also drop spaces typed into the glossary search.
+  window.addEventListener('keydown', function (e) {
+    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].indexOf(e.key) >= 0) e.preventDefault();
+  });
+</script>
+{{{ SCRIPT }}}
+</body>
+</html>
