@@ -1,0 +1,9 @@
+{
+  "name": "poker-trainer-web-tests",
+  "private": true,
+  "type": "module",
+  "description": "Browser tests for the WebAssembly build (make test-web)",
+  "devDependencies": {
+    "playwright": "1.47.2"
+  }
+}

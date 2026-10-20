@@ -1,0 +1,11 @@
+# native binaries
+poker
+sim
+nash
+test_poker
+# raylib checkout built for the web (make web fetches it)
+build/raylib/
+# web test dependencies
+tests/node_modules/
+tests/package-lock.json
+.DS_Store
