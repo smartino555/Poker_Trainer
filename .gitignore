@@ -9,3 +9,5 @@ build/raylib/
 tests/node_modules/
 tests/package-lock.json
 .DS_Store
+# test suite built for node (make test-wasm)
+build/test_poker.*
