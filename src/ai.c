@@ -2,7 +2,9 @@
 //   Easy   - loose-passive "calling station": plays half its hands, calls with any pair or draw, rarely raises
 //   Medium - tight but position-blind; judges hands against random cards, so it pays off strong bettors
 //   Hard   - plays the coach's strategy (position charts, range-based equity, mixed bluffs) and adjusts to opponents
+// Hold'em and Omaha use the bots below; every other game uses the equity bots in basic.c.
 #include "ai.h"
+#include "basic.h"
 #include "range.h"
 #include <math.h>
 
@@ -136,7 +138,10 @@ static Action hardBot(const Game *g, int p, Rng *rng) {
     return act(type, 0);
 }
 
+bool aiClassic(int variant) { return variant == V_HOLDEM || variant == V_OMAHA; }
+
 Action aiDecide(const Game *g, int p, Rng *rng) {
+    if (!aiClassic(g->variant) || g->phase == PH_DRAW) return basicBot(g, p, g->s[p].level, rng);
     switch (g->s[p].level) {
     case LV_EASY: return easyBot(g, p, rng);
     case LV_HARD: return hardBot(g, p, rng);
