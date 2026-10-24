@@ -1083,6 +1083,426 @@ static void testArrange(void) {
     CHECK(a.order[0] == 1, "SORT_NONE leaves the order alone");
 }
 
+// ---------------------------------------------------------------- every game: evaluators
+
+static int nCards(const char *s) { return (int)(strlen(s) + 1) / 3; }
+static int evV(int variant, const char *s) { int c[7]; int n = nCards(s); cards(s, c, n); return evalCards(variant, c, n, NULL, 0, NULL); }
+static void nameV(int variant, const char *s, char *buf, int n) { handNameV(variant, evV(variant, s), buf, n); }
+
+static void testEvalVariants(void) {
+    printf("evaluators: short deck, A-5 low, 2-7 low, badugi, Omaha hi-lo\n");
+    // short deck: every five-card hand from the 36-card deck, against combinatorial counts
+    long cnt[9] = { 0 };
+    int d[36], nd = 0, c[5];
+    for (int x = 0; x < 52; x++) if (cardRank(x) >= 4) d[nd++] = x;
+    for (int a = 0; a < 36; a++) for (int b = a + 1; b < 36; b++) for (int e = b + 1; e < 36; e++)
+    for (int f = e + 1; f < 36; f++) for (int h = f + 1; h < 36; h++) {
+        c[0] = d[a]; c[1] = d[b]; c[2] = d[e]; c[3] = d[f]; c[4] = d[h];
+        cnt[handCat(evalShortDeck(c, 5))]++;
+    }
+    static const long SD[9] = { 122400, 193536, 36288, 16128, 6120, 480, 1728, 288, 24 };
+    for (int i = 0; i < 9; i++) CHECK(cnt[i] == SD[i], "short deck %s: %ld, expected %ld", catName(i), cnt[i], SD[i]);
+    int h5[5];
+    cards("Ah 6c 7d 8s 9h", h5, 5);
+    CHECK(handCat(evalShortDeck(h5, 5)) == HC_STRAIGHT && handRank1(evalShortDeck(h5, 5)) == 7, "short deck: A-6-7-8-9 is a nine-high straight");
+    int fl[5], fh[5];
+    cards("Ah Jh 9h 7h 6h", fl, 5); cards("Ks Kd Kc 6s 6d", fh, 5);
+    CHECK(evalShortDeck(fl, 5) > evalShortDeck(fh, 5), "short deck: a flush beats a full house");
+    cards("6s 7d 8c 9h Ts", h5, 5); cards("Ah Ad Ac Ks Qd", fh, 5);
+    CHECK(evalShortDeck(h5, 5) > evalShortDeck(fh, 5), "short deck: a straight beats three of a kind (Wikipedia's ranking)");
+    char buf[64];
+    handNameV(V_SHORTDECK, evalShortDeck(fl, 5), buf, sizeof buf);
+    CHECK(strcmp(buf, "Flush, Ace high") == 0, "short deck flush name '%s'", buf);
+
+    // ace-to-five low (Razz, the low half of hi-lo games)
+    CHECK(evV(V_RAZZ, "5h 4h 3h 2h Ah") == evV(V_RAZZ, "5c 4h 3d 2s Ah"), "A-5: flushes don't count");
+    CHECK(evV(V_RAZZ, "5c 4h 3d 2s Ah") > evV(V_RAZZ, "6c 4h 3d 2s Ah"), "the wheel is the best low");
+    CHECK(evV(V_RAZZ, "6c 4h 3d 2s Ah") > evV(V_RAZZ, "6c 5h 3d 2s Ah"), "6-4 beats 6-5");
+    CHECK(evV(V_RAZZ, "Kc Qh Jd Ts 9h") > evV(V_RAZZ, "2c 2h 3d 4s 5h"), "any no-pair hand beats a pair");
+    CHECK(evV(V_RAZZ, "3c 3h 4d 5s 6h") > evV(V_RAZZ, "4c 4h 2d 3s 5h"), "lower pair is the better low");
+    nameV(V_RAZZ, "As 2d 3c 4h Kd Kc 6s", buf, sizeof buf);
+    CHECK(strcmp(buf, "6-4-3-2-A low") == 0, "best five of seven: '%s'", buf);
+    nameV(V_RAZZ, "As Ad 2c 2h 3d 3s 4c", buf, sizeof buf);
+    CHECK(strcmp(buf, "Pair of Aces") == 0, "seven cards with four ranks make a paired low: '%s'", buf);
+    int seen8 = 0;
+    static unsigned char hit[1 << 20];
+    memset(hit, 0, sizeof hit);
+    for (c[0] = 0; c[0] < 52; c[0]++) for (c[1] = c[0] + 1; c[1] < 52; c[1]++) for (c[2] = c[1] + 1; c[2] < 52; c[2]++)
+    for (c[3] = c[2] + 1; c[3] < 52; c[3]++) for (c[4] = c[3] + 1; c[4] < 52; c[4]++) {
+        int v = evalLowA5(c, 5);
+        if (lowQualifies8(v)) { int k = ((1 << 24) - v) & 0xFFFFF; if (!hit[k]) { hit[k] = 1; seen8++; } }
+    }
+    CHECK(seen8 == 56, "56 different 8-or-better lows (C(8,5)), got %d", seen8);
+    int lo[5];
+    cards("8c 7h 6d 5s 4h", lo, 5); CHECK(lowQualifies8(evalLowA5(lo, 5)), "8-7-6-5-4 qualifies");
+    cards("9c 5h 4d 3s 2h", lo, 5); CHECK(!lowQualifies8(evalLowA5(lo, 5)), "9-5-4-3-2 doesn't qualify");
+    cards("8c 8h 4d 3s 2h", lo, 5); CHECK(!lowQualifies8(evalLowA5(lo, 5)), "a pair doesn't qualify");
+
+    // deuce-to-seven
+    CHECK(evV(V_TD27, "7h 5d 4c 3s 2h") > evV(V_TD27, "7h 6d 4c 3s 2h"), "2-7: 7-5 beats 7-6");
+    CHECK(evV(V_TD27, "Kh Qd Jc Ts 8h") > evV(V_TD27, "Ah 2d 3c 4s 5h"), "2-7: A-2-3-4-5 is ace-high, worse than king-high");
+    nameV(V_TD27, "Ah 2d 3c 4s 5h", buf, sizeof buf);
+    CHECK(strcmp(buf, "A-5-4-3-2 low") == 0, "2-7 wheel name '%s'", buf);
+    CHECK(evV(V_TD27, "Kh Qd Jc Ts 8h") > evV(V_TD27, "6h 5d 4c 3s 2h"), "2-7: a straight counts against you");
+    CHECK(evV(V_TD27, "8h 6d 4c 3s 2h") > evV(V_TD27, "7h 5h 4h 3h 2h"), "2-7: a flush counts against you");
+    nameV(V_TD27, "6h 5d 4c 3s 2h", buf, sizeof buf);
+    CHECK(strcmp(buf, "Straight, Six high") == 0, "2-7 straight name '%s'", buf);
+    CHECK(evV(V_TD27, "Ah Ad 3c 4s 5h") < evV(V_TD27, "Ah Kd Qc Js 9h"), "2-7: a pair loses to any no-pair hand");
+
+    // badugi (Wikipedia's example: A-spades 5-diamonds 9-diamonds 9-hearts is a three-card hand)
+    nameV(V_BADUGI, "As 5d 9d 9h", buf, sizeof buf);
+    CHECK(strcmp(buf, "3-card 9-5-A") == 0, "badugi example '%s'", buf);
+    CHECK(evV(V_BADUGI, "Kc Qd Jh Ts") > evV(V_BADUGI, "As 2s 3d 4h"), "any badugi beats any three-card hand");
+    CHECK(evV(V_BADUGI, "4c 3d 2h As") > evV(V_BADUGI, "5c 3d 2h As"), "A-2-3-4 is the best badugi");
+    CHECK(evV(V_BADUGI, "7c 6d 2h As") > evV(V_BADUGI, "7c 6d 3h As"), "same top card: the next card decides");
+    nameV(V_BADUGI, "4c 3d 2h As", buf, sizeof buf);
+    CHECK(strcmp(buf, "Badugi 4-3-2-A") == 0, "badugi name '%s'", buf);
+    nameV(V_BADUGI, "Kc Kd Ks Kh", buf, sizeof buf);
+    CHECK(strcmp(buf, "1-card K") == 0, "four kings is the worst hand: '%s'", buf);
+
+    // Omaha hi-lo: 2 + 3 for each half, and the two halves may use different hole cards
+    int h[5], b[5], low;
+    cards("Ah 2c Ks Kd", h, 4); cards("Kh 3d 4s 7c Jh", b, 5);
+    int hv = evalCards(V_OMAHA8, h, 4, b, 5, &low);
+    CHECK(handCat(hv) == HC_TRIPS && low > 0, "O8: three kings for high (KK) and a low with A-2");
+    lowName(low, buf, sizeof buf);
+    CHECK(strcmp(buf, "7-4-3-2-A low") == 0, "O8 low '%s'", buf);
+    cards("Kh 3d 4s Qc Jh", b, 5);
+    evalCards(V_OMAHA8, h, 4, b, 5, &low);
+    CHECK(low == 0, "O8: only two low cards on the board - no low");
+    cards("Ah 2c 3s 4d", h, 4); cards("5h 6d 7s Tc Jh", b, 5);
+    evalCards(V_OMAHA8, h, 4, b, 5, &low);
+    lowName(low, buf, sizeof buf);
+    CHECK(strcmp(buf, "7-6-5-2-A low") == 0, "O8: the best two hole cards for low, '%s'", buf);
+    // 5-card Omaha: still exactly two
+    cards("Ah Kh Qh Jh Th", h, 5); cards("2h 3c 4d 9s 9c", b, 5);
+    CHECK(handCat(evalCards(V_OMAHA5, h, 5, b, 5, NULL)) == HC_PAIR, "Big O: five hearts in hand + one on board is no flush");
+    // stud hi-lo: any five for high, any five for low
+    int st[7];
+    cards("7c 7d 6h 4s 4c 3d 2h", st, 7);
+    hv = evalCards(V_STUD8, st, 7, NULL, 0, &low);
+    lowName(low, buf, sizeof buf);
+    CHECK(handCat(hv) == HC_TWOPAIR && strcmp(buf, "7-6-4-3-2 low") == 0, "Wikipedia's stud hi-lo example: two pair and a 7-6 low ('%s')", buf);
+}
+
+// ---------------------------------------------------------------- stud
+
+static void presetDeck(Game *g, const char *s) { int n = nCards(s); cards(s, g->preset, n); g->npreset = n; }
+
+static bool hadEvent(const Game *g, int type, int seat) {
+    int from = g->evSeq > MAXEV ? g->evSeq - MAXEV : 0;
+    for (int i = from; i < g->evSeq; i++) {
+        const GameEvent *e = &g->ev[i % MAXEV];
+        if (e->type == type && (seat < 0 || e->seat == seat)) return true;
+    }
+    return false;
+}
+
+static void testStud(void) {
+    printf("stud: antes, bring-in, completing, acting order, open pair, cap\n");
+    Game g;
+    Legal l;
+    GameConfig cf = cfgN(3, V_STUD, BL_FIXED, 1000);
+    cf.sb = 5; cf.bb = 10;
+    gameSetup(&g, &cf);
+    g.button = 0;
+    // dealt to seats 1, 2, 0: down, down, up. Up cards: seat 1 2d, seat 2 2c, seat 0 Kh. 4th street: 2h, 9c, 3s
+    presetDeck(&g, "Ah Ad As Kc Kd Ks 2d 2c Kh 2h 9c 3s");
+    gameNewHand(&g);
+    CHECK(g.ante == 2 && g.bringIn == 3 && g.smallBet == 10 && g.bigBet == 20, "stakes: ante %d bring-in %d %d/%d", g.ante, g.bringIn, g.smallBet, g.bigBet);
+    CHECK(gamePot(&g) == 6 && g.s[0].bet == 0, "everyone antes 2 (pot %d)", gamePot(&g));
+    CHECK(g.s[1].nhole == 3 && g.s[1].upMask == 4 && g.ncards == 3, "two down, one up");
+    CHECK(g.toAct == 2 && g.bringInSeat == 2, "the 2 of clubs brings in: lowest card, clubs lowest suit (toAct %d)", g.toAct);
+    CHECK(hadEvent(&g, EV_BRINGIN, 2), "bring-in event");
+    gameLegal(&g, &l);
+    CHECK(l.bringIn && l.toCall == 3 && l.minTo == 10 && !l.canCheck, "bring in 3 or complete to 10 (call %d min %d)", l.toCall, l.minTo);
+    act(&g, A_FOLD, 0);                      // the bring-in is forced: a fold posts it
+    CHECK(g.s[2].bet == 3 && g.curBet == 3 && g.toAct == 0, "brought in for 3, seat 0 next");
+    gameLegal(&g, &l);
+    CHECK(l.toCall == 3 && l.minTo == 10 && l.maxTo == 10 && l.canRaise, "facing the bring-in: call 3 or complete to 10");
+    act(&g, A_RAISE, 999);
+    CHECK(g.curBet == 10 && g.nBets == 1 && logHas(&g, "completes to $10"), "completed to 10");
+    act(&g, A_RAISE, 0);                     // fixed limit: the amount is ignored
+    CHECK(g.curBet == 20, "raise to 20 (%d)", g.curBet);
+    act(&g, A_RAISE, 0);
+    act(&g, A_RAISE, 0);
+    CHECK(g.curBet == 40 && g.nBets == 4 && hadEvent(&g, EV_CAP, 0), "bet + 3 raises = capped at 40");
+    gameLegal(&g, &l);
+    CHECK(!l.canRaise && l.toCall == 20, "capped: seat 1 can only call 20");
+    act(&g, A_RAISE, 0);                     // turns into a call
+    act(&g, A_CALL, 0);
+    CHECK(g.toAct == -1, "round over");
+    gameAdvance(&g);
+    CHECK(g.street == 1 && g.s[0].nhole == 4 && g.openPair, "4th street: seat 1 shows a pair of deuces");
+    CHECK(g.toAct == 1, "the best hand showing acts first (toAct %d)", g.toAct);
+    gameLegal(&g, &l);
+    CHECK(l.minTo == 10 && l.maxTo == 20, "open pair: bet 10 or 20 (%d..%d)", l.minTo, l.maxTo);
+    act(&g, A_RAISE, 20);
+    gameLegal(&g, &l);
+    CHECK(g.curBet == 20 && l.minTo == 40, "after the big bet, raises are big bets (%d)", l.minTo);
+    act(&g, A_CALL, 0); act(&g, A_CALL, 0);
+    gameAdvance(&g);
+    CHECK(g.street == 2 && g.betUnit == 20 && !g.openPair, "5th street: big bets");
+    for (int k = 0; k < 3; k++) { while (g.toAct >= 0) act(&g, A_CHECK, 0); gameAdvance(&g); }
+    CHECK(g.handOver && g.showdown && g.s[0].nhole == 7 && g.s[0].upMask == 0x3C, "7th street comes face down; showdown with 7 cards");
+
+    // Razz: the highest card brings in (the king of spades is the worst), the lowest hand acts first
+    GameConfig rz = cfgN(3, V_RAZZ, BL_FIXED, 1000);
+    rz.bb = 10;
+    gameSetup(&g, &rz);
+    g.button = 0;
+    presetDeck(&g, "Ah 2d 3s 4c 5d 6s Kh Ks 5c 8h 9c 2s");
+    gameNewHand(&g);
+    CHECK(g.toAct == 2, "Razz: the king of spades brings in (toAct %d)", g.toAct);
+    act(&g, A_CALL, 0); act(&g, A_CALL, 0); act(&g, A_CALL, 0);
+    gameAdvance(&g);
+    CHECK(g.toAct == 0, "Razz 4th street: 5-2 showing is the lowest and acts first (toAct %d)", g.toAct);
+
+    // heads-up: no cap
+    GameConfig hu = cfgN(2, V_STUD, BL_FIXED, 2000);
+    hu.bb = 10;
+    gameSetup(&g, &hu);
+    g.button = 0;
+    gameNewHand(&g);
+    CHECK(g.capOff, "two players: no cap");
+    act(&g, A_RAISE, 0);                     // the bring-in completes
+    for (int k = 0; k < 6; k++) act(&g, A_RAISE, 0);
+    CHECK(g.nBets == 7 && g.curBet == 70, "heads-up raising keeps going (%d bets, %d)", g.nBets, g.curBet);
+}
+
+// ---------------------------------------------------------------- draw games
+
+static bool cardsOk(const Game *g) {
+    int seen[52] = { 0 };
+    for (int i = 0; i < g->n; i++)
+        if (g->s[i].inHand) for (int k = 0; k < g->s[i].nhole; k++) seen[g->s[i].hole[k]]++;
+    for (int i = 0; i < g->nboard; i++) seen[g->board[i]]++;
+    for (int i = g->dpos; i < g->deckN; i++) seen[g->deck[i]]++;
+    for (int i = 0; i < g->ndisc; i++) seen[g->disc[i]]++;
+    for (int c = 0; c < 52; c++) if (seen[c] > 1) return false;
+    return true;
+}
+
+static void testDraw(void) {
+    printf("draw games: draws, order, big bets, reshuffling the discards\n");
+    Game g;
+    Legal l;
+    GameConfig cf = cfgN(3, V_TD27, BL_FIXED, 1000);
+    cf.sb = 5; cf.bb = 10;
+    gameSetup(&g, &cf);
+    g.button = 0;
+    gameNewHand(&g);
+    CHECK(g.toAct == 0 && g.phase == PH_BET && g.s[0].nhole == 5, "3-handed: the button acts first before the draw");
+    act(&g, A_CALL, 0); act(&g, A_CALL, 0); act(&g, A_CHECK, 0);
+    CHECK(g.toAct == -1, "pre-draw betting closed");
+    gameAdvance(&g);
+    gameLegal(&g, &l);
+    CHECK(g.phase == PH_DRAW && g.toAct == 1 && l.draw, "first draw: the player left of the button draws first (toAct %d)", g.toAct);
+    int before[5];
+    memcpy(before, g.s[1].hole, sizeof before);
+    gameAct(&g, (Action){ A_DRAW, 3 });           // throw away cards 0 and 1
+    CHECK(g.s[1].drew[0] == 2 && g.s[1].hole[2] == before[2] && g.s[1].hole[4] == before[4], "drew 2, kept the rest in place");
+    CHECK(g.s[1].hole[0] != before[0] && g.s[1].hole[1] != before[1] && g.ndisc == 2, "the two discards are replaced");
+    act(&g, A_CHECK, 0);                           // anything but a draw = stand pat
+    CHECK(g.s[2].drew[0] == 0 && g.toAct == 0, "stood pat");
+    gameAct(&g, (Action){ A_DRAW, 31 });
+    CHECK(g.toAct == -1 && g.s[0].drew[0] == 5 && cardsOk(&g), "everyone drew; no card twice");
+    gameAdvance(&g);
+    CHECK(g.phase == PH_BET && g.street == 1 && g.toAct == 1 && g.betUnit == 10, "after the 1st draw: small bets, first left of the button");
+    act(&g, A_CHECK, 0); act(&g, A_CHECK, 0); act(&g, A_CHECK, 0);
+    gameAdvance(&g);
+    while (g.toAct >= 0) gameAct(&g, (Action){ A_DRAW, 0 });
+    gameAdvance(&g);
+    CHECK(g.street == 2 && g.betUnit == 20, "after the 2nd draw: big bets (%d)", g.betUnit);
+
+    // six players drawing five cards every time: the deck runs out and the discards are reshuffled,
+    // never giving a player back what they just threw away
+    GameConfig six = cfgN(6, V_TD27, BL_FIXED, 1000);
+    int resh = 0, bad = 0, own = 0;
+    for (int h = 0; h < 40; h++) {
+        six.seed = 300 + h;
+        gameSetup(&g, &six);
+        gameNewHand(&g);
+        int guard = 0;
+        while (!g.handOver && ++guard < 400) {
+            if (g.toAct < 0) { gameAdvance(&g); continue; }
+            if (g.phase == PH_DRAW) {
+                int p = g.toAct, thrown[5];
+                memcpy(thrown, g.s[p].hole, sizeof thrown);
+                int seq = g.evSeq;
+                gameAct(&g, (Action){ A_DRAW, 31 });
+                for (int i = seq; i < g.evSeq; i++) if (g.ev[i % MAXEV].type == EV_RESHUFFLE) resh++;
+                for (int a = 0; a < 5; a++) for (int b2 = 0; b2 < 5; b2++) own += g.s[p].hole[a] == thrown[b2];
+            } else act(&g, g.toAct % 2 ? A_CALL : A_CHECK, 0);
+            if (!cardsOk(&g)) bad++;
+        }
+    }
+    CHECK(resh > 0, "the deck ran out and was reshuffled (%d times)", resh);
+    CHECK(bad == 0 && own == 0, "no duplicate cards (%d), nobody got their own discards back (%d)", bad, own);
+}
+
+// ---------------------------------------------------------------- hi-lo
+
+static void playDown(Game *g) {
+    while (!g->handOver) { if (g->toAct >= 0) act(g, A_CHECK, 0); else gameAdvance(g); }
+}
+
+static void testHiLo(void) {
+    printf("hi-lo split pots: split, scoop, odd chip, quartering, side pots\n");
+    Game g;
+    // heads-up Omaha hi-lo: seat 0 has the low, seat 1 the high
+    GameConfig cf = cfgN(2, V_OMAHA8, BL_FIXED, 1000);
+    gameSetup(&g, &cf);
+    g.button = 0;
+    gameNewHand(&g);
+    const char *h1[2] = { "Ah 2h Kc Kd", "Qs Qd Js Td" };
+    rig(&g, h1, "3s 5d 8c Qh 9h");
+    act(&g, A_CALL, 0);
+    playDown(&g);
+    CHECK(g.pots[0].hiAmt == 2 && g.pots[0].loAmt == 2 && g.s[0].stack == 1000 && g.s[1].stack == 1000, "pot 4 split 2 / 2 (stacks %d %d)", g.s[0].stack, g.s[1].stack);
+    CHECK(strstr(g.winText, "High: Carlos") && strstr(g.winText, "Low: Mia"), "headline names both halves: '%s'", g.winText);
+    // no low possible: the high hand scoops
+    gameSetup(&g, &cf);
+    g.button = 0;
+    gameNewHand(&g);
+    const char *h2[2] = { "Ah 2h Kc Kd", "Qs Qd Js Td" };
+    rig(&g, h2, "Ks Jd 9c Qh Th");
+    act(&g, A_CALL, 0);
+    playDown(&g);
+    CHECK(g.pots[0].loAmt == 0 && g.s[0].won == 4, "no qualifying low: high takes it all (won %d)", g.s[0].won);
+    CHECK(strstr(g.winText, "no low qualifies") != NULL, "headline: '%s'", g.winText);
+    // odd chip goes to the high half: a dead small blind makes the pot 5
+    GameConfig c3 = cfgN(3, V_OMAHA8, BL_FIXED, 1000);
+    gameSetup(&g, &c3);
+    g.button = 0;
+    gameNewHand(&g);
+    const char *h3[3] = { "Ah 2h Kc Kd", "7c 7d 6c 6d", "Qs Qd Js Td" };
+    rig(&g, h3, "3s 5d 8c Qh 9h");
+    act(&g, A_CALL, 0); act(&g, A_FOLD, 0); act(&g, A_CHECK, 0);
+    playDown(&g);
+    CHECK(g.s[2].won == 3 && g.s[0].won == 2, "pot 5: high 3, low 2 (got %d / %d)", g.s[2].won, g.s[0].won);
+    // quartering: two players tie for low
+    gameSetup(&g, &c3);
+    g.button = 0;
+    gameNewHand(&g);
+    const char *h4[3] = { "Ah 2h Kc Kd", "As 2s 7c 7d", "Qs Qd Js Td" };
+    rig(&g, h4, "3s 5d 8c Qh 9h");
+    act(&g, A_CALL, 0); act(&g, A_CALL, 0); act(&g, A_CHECK, 0);
+    playDown(&g);
+    CHECK(g.s[2].won == 3 && g.s[0].won + g.s[1].won == 3 && g.s[0].won >= 1 && g.s[1].won >= 1, "pot 6: high 3, the tied lows share 3 (%d %d %d)", g.s[0].won, g.s[1].won, g.s[2].won);
+    // side pot in hi-lo: each pot is split on its own
+    gameSetup(&g, &c3);
+    g.button = 0;
+    gameNewHand(&g);
+    g.s[0].stack = 10;
+    const char *h5[3] = { "Ah 2h Kc Kd", "Qs Qd Js Td", "9s 9d Tc Th" };
+    rig(&g, h5, "3s 5d 8c Qh 4h");
+    int before = chips(&g);
+    act(&g, A_RAISE, 0); act(&g, A_RAISE, 0); act(&g, A_RAISE, 0);   // button 4, SB 6, BB 8
+    act(&g, A_CALL, 0); act(&g, A_CALL, 0);
+    gameAdvance(&g);
+    for (int k = 0; k < 6 && !g.handOver; k++) {
+        if (g.toAct < 0) { gameAdvance(&g); continue; }
+        act(&g, g.s[g.toAct].stack > 0 ? A_RAISE : A_CALL, 0);
+    }
+    playDown(&g);
+    CHECK(chips(&g) == before && g.npots == 2, "side pots in hi-lo conserve chips (%d pots)", g.npots);
+    CHECK(g.pots[0].loAmt > 0 && (g.pots[0].loMask & 1) && !(g.pots[1].eligible & 1), "the short stack wins low in the main pot only");
+}
+
+// ---------------------------------------------------------------- mixed games
+
+static void testMixed(void) {
+    printf("mixed games: HORSE and 8-Game rotations\n");
+    Game g;
+    GameConfig cf = cfgN(3, V_HOLDEM, BL_NOLIMIT, 1000);
+    cf.mix = MIX_HORSE;
+    gameSetup(&g, &cf);
+    CHECK(g.variant == V_HOLDEM && g.limit == BL_FIXED, "HORSE starts with limit Hold'em");
+    int order[16];
+    for (int h = 0; h < 16; h++) {
+        gameNewHand(&g);
+        order[h] = g.variant;
+        playDown(&g);
+    }
+    CHECK(order[2] == V_HOLDEM && order[3] == V_OMAHA8 && order[6] == V_RAZZ && order[9] == V_STUD && order[12] == V_STUD8 && order[15] == V_HOLDEM,
+          "one orbit of each: H O R S E then back to H (%d %d %d %d %d %d)", order[2], order[3], order[6], order[9], order[12], order[15]);
+    cf.mix = MIX_8GAME;
+    gameSetup(&g, &cf);
+    int lims[24], vars[24];
+    for (int h = 0; h < 24; h++) { gameNewHand(&g); vars[h] = g.variant; lims[h] = g.limit; playDown(&g); }
+    CHECK(vars[0] == V_TD27 && vars[18] == V_HOLDEM && lims[18] == BL_NOLIMIT && vars[21] == V_OMAHA && lims[21] == BL_POTLIMIT,
+          "8-Game: starts with 2-7 triple draw, then NL Hold'em and PLO at the end");
+}
+
+// ---------------------------------------------------------------- every game and structure
+
+static void testFuzzAll(int hands) {
+    printf("fuzz every game x betting structure (%d hands each)\n", hands);
+    Game *g = malloc(sizeof *g);
+    Rng r;
+    rngSeed(&r, 4242);
+    for (int v = 0; v < V_COUNT; v++)
+        for (int lim = 0; lim < BL_COUNT; lim++) {
+            if (!(varInfo(v)->limits >> lim & 1)) continue;
+            int badState = 0, badChips = 0, stuck = 0, badCards = 0, badEnd = 0, badCap = 0;
+            for (int n = 2; n <= 6; n++) {
+                GameConfig cf = cfgN(n, v, lim, 60 + 37 * n);
+                cf.sb = 5; cf.bb = 10;
+                cf.buyin = 300 + 70 * n;
+                cf.seed = 77 + n + v * 13 + lim;
+                gameSetup(g, &cf);
+                for (int h = 0; h < hands / 5; h++) {
+                    for (int i = 0; i < n; i++) if (rngInt(&r, 25) == 0) g->s[i].stack = 1 + rngInt(&r, 30);
+                    gameNewHand(g);
+                    int start = chips(g), guard = 0;
+                    if (!cardsOk(g)) badCards++;
+                    while (!g->handOver) {
+                        if (++guard > 500) { stuck++; break; }
+                        if (g->toAct < 0) { gameAdvance(g); if (!cardsOk(g)) badCards++; continue; }
+                        const Seat *s = &g->s[g->toAct];
+                        Legal l;
+                        gameLegal(g, &l);
+                        if (g->phase == PH_DRAW) {
+                            if (!l.draw || !s->inHand) badState++;
+                            gameAct(g, (Action){ A_DRAW, rngInt(&r, 1 << s->nhole) });
+                            if (!cardsOk(g)) badCards++;
+                            continue;
+                        }
+                        if (!s->inHand || s->allin) badState++;
+                        if (l.toCall < 0 || l.minTo > l.maxTo || l.maxTo > s->stack + s->bet || (l.canRaise && l.minTo <= g->curBet)) badState++;
+                        if (lim == BL_FIXED && l.canRaise && l.minTo != l.maxTo && !g->openPair && !l.bringIn) badState++;
+                        if (lim == BL_FIXED && !g->capOff && g->nBets > 4) badCap++;
+                        int t = rngInt(&r, 10);
+                        Action a = { t < 2 ? A_FOLD : t < 6 ? (l.canCheck ? A_CHECK : A_CALL) : A_RAISE, 0 };
+                        a.amount = rngInt(&r, 3) == 0 ? l.maxTo : l.minTo + rngInt(&r, l.maxTo - l.minTo + 1);
+                        if (rngInt(&r, 20) == 0) a.amount = rngInt(&r, 5000) - 100;
+                        gameAct(g, a);
+                        for (int i = 0; i < n; i++) if (g->s[i].stack < 0 || g->s[i].bet < 0) badState++;
+                        if (chips(g) != start) badChips++;
+                    }
+                    int after = 0;
+                    for (int i = 0; i < n; i++) after += g->s[i].stack;
+                    if (after != start) badChips++;
+                    if (g->showdown) {
+                        const VariantInfo *vi = varInfo(v);
+                        for (int i = 0; i < n; i++)
+                            if (g->s[i].inHand && g->s[i].nhole != vi->nhole) badEnd++;
+                        if (vi->family == FAM_BOARD && g->nboard != 5) badEnd++;
+                    }
+                }
+            }
+            const char *nm = varInfo(v)->shortName, *ln = limitShort(lim);
+            CHECK(badState == 0, "%s %s: invalid states %d", nm, ln, badState);
+            CHECK(badChips == 0, "%s %s: chip conservation failures %d", nm, ln, badChips);
+            CHECK(stuck == 0, "%s %s: hands that never finished %d", nm, ln, stuck);
+            CHECK(badCards == 0, "%s %s: duplicate cards %d", nm, ln, badCards);
+            CHECK(badEnd == 0, "%s %s: wrong card counts at showdown %d", nm, ln, badEnd);
+            CHECK(badCap == 0, "%s %s: more than a bet and three raises %d", nm, ln, badCap);
+        }
+    free(g);
+}
+
 int main(void) {
     rangesInit();
     testEvaluator();
@@ -1097,6 +1517,12 @@ int main(void) {
     testFuzz(V_HOLDEM, BL_POTLIMIT, 10000);
     testFuzz(V_OMAHA, BL_POTLIMIT, 10000);
     testFuzz(V_OMAHA, BL_NOLIMIT, 5000);
+    testEvalVariants();
+    testStud();
+    testDraw();
+    testHiLo();
+    testMixed();
+    testFuzzAll(2000);
     testEquity();
     testCoachPreflop();
     testCoachPostflop();

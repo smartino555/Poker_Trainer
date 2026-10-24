@@ -1,6 +1,9 @@
 // sim.c - headless bot-vs-bot simulation: checks chip conservation and compares difficulty levels
-// usage: sim [hands] [game 0=holdem 1=omaha] [lvl lvl ...]   (levels 1=easy 2=medium 3=hard, 2-6 seats)
+// usage: sim [hands] [game] [lvl lvl ...]   (levels 1=easy 2=medium 3=hard, 2-6 seats)
+//        game: 0 Hold'em, 1 Omaha, 2 Omaha hi-lo, 3 5-card Omaha, 4 short deck, 5 stud, 6 stud hi-lo, 7 razz,
+//              8 5-card draw, 9 2-7 triple draw, 10 2-7 single draw, 11 badugi, h HORSE, e 8-Game
 //        SIM_BB=15 sim ...   starts everyone with 15 big blinds instead of 100 (short-stack / push-fold play)
+//        SIM_LIMIT=0|1|2     no-limit / pot-limit / fixed limit instead of the game's usual structure
 #include "../src/ai.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,8 +11,15 @@
 
 int main(int argc, char **argv) {
     int hands = argc > 1 ? atoi(argv[1]) : 2000;
-    int variant = argc > 2 ? atoi(argv[2]) : V_HOLDEM;
-    GameConfig cfg = { .variant = variant, .limit = variant == V_OMAHA ? BL_POTLIMIT : BL_NOLIMIT,
+    int variant = V_HOLDEM, mix = MIX_NONE;
+    if (argc > 2) {
+        if (argv[2][0] == 'h') mix = MIX_HORSE;
+        else if (argv[2][0] == 'e') mix = MIX_8GAME;
+        else variant = atoi(argv[2]);
+    }
+    if (variant < 0 || variant >= V_COUNT) variant = V_HOLDEM;
+    int limit = getenv("SIM_LIMIT") ? atoi(getenv("SIM_LIMIT")) : varInfo(variant)->defLimit;
+    GameConfig cfg = { .variant = variant, .limit = limit, .mix = mix,
                        .n = 6, .sb = 1, .bb = 2, .buyin = 200, .human = -1, .seed = (uint64_t)time(NULL) };
     if (getenv("SIM_BB")) cfg.buyin = cfg.bb * atoi(getenv("SIM_BB"));
     int def[6] = { 1, 2, 3, 1, 2, 3 };
@@ -30,7 +40,7 @@ int main(int argc, char **argv) {
         for (int i = 0; i < g->n; i++) { before[i] = g->s[i].stack + g->s[i].total; chipsBefore += before[i]; }
         int guard = 0;
         while (!g->handOver) {
-            if (++guard > 500) { printf("stuck in hand %d\n", g->handNo); return 1; }
+            if (++guard > 500) { printf("stuck in hand %d\n", g->handNo); for (int i = 0; i < g->nlog; i++) printf("  %s\n", g->log[i]); return 1; }
             if (g->toAct >= 0) { gameAct(g, aiDecide(g, g->toAct, &rng)); acts++; }
             else gameAdvance(g);
         }
@@ -48,8 +58,8 @@ int main(int argc, char **argv) {
         showdowns += g->showdown;
     }
     double secs = (double)(clock() - t0) / CLOCKS_PER_SEC;
-    printf("%s, %d hands, %d seats, %.1fs (%.1f ms/hand), %d%% showdowns, %.1f actions/hand\n",
-           variant == V_OMAHA ? "Omaha" : "Hold'em", hands, g->n, secs, 1000 * secs / hands, 100 * showdowns / hands, (double)acts / hands);
+    printf("%s %s, %d hands, %d seats, %.1fs (%.1f ms/hand), %d%% showdowns, %.1f actions/hand\n",
+           mix ? "" : limitName(limit), mix ? mixName(mix) : varInfo(variant)->name, hands, g->n, secs, 1000 * secs / hands, 100 * showdowns / hands, (double)acts / hands);
     double byLv[4] = { 0 };
     int cnt[4] = { 0 };
     for (int i = 0; i < g->n; i++) {

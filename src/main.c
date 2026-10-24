@@ -4,6 +4,7 @@
 #include "range.h"
 #include "arrange.h"
 #include "glossary.h"
+#include "sound.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -341,6 +342,13 @@ static uint64_t Entropy(void) {
     return e;
 }
 
+static void DealHoleCards(void) {
+    gameNewHand(&game);
+    int dealt = 0;
+    for (int i = 0; i < game.n; i++) if (game.s[i].inHand) dealt++;
+    sndDeal(dealt * holeCount(&game));
+}
+
 static void StartNewGame(void) {
     GameConfig cfg = { 0 };
     cfg.variant = setVariant;
@@ -362,7 +370,7 @@ static void StartNewGame(void) {
     memset(leaks, 0, sizeof leaks);
     ResetCoach();
     panelTab = gameMode == MODE_TRAIN ? 0 : 1;
-    gameNewHand(&game);
+    DealHoleCards();
     stepTimer = BotDelay();
     handOverT = 0;
     handCounted = false;
@@ -371,7 +379,7 @@ static void StartNewGame(void) {
 static void NextHand(void) {
     if (game.s[game.human].stack <= 0) return;
     ResetCoach();
-    gameNewHand(&game);
+    DealHoleCards();
     stepTimer = BotDelay();
     handOverT = 0;
     handCounted = false;
@@ -477,6 +485,9 @@ static void UpdateGame(float dt) {
             int pot = 0;
             for (int i = 0; i < game.npots; i++) pot += game.potAmt[i];
             if (game.s[game.human].won > 0 && pot > biggestPot) biggestPot = pot;
+            const Seat *h = &game.s[game.human];
+            if (h->won > h->total) sndWin();
+            else if (h->won < h->total && h->inHand) sndLose();   // folding is your own choice: no jeer
         }
         handOverT += dt;
         float wait = gameMode == MODE_TRAIN ? 9999 : game.showdown ? 4.0f : 2.2f;
@@ -487,7 +498,9 @@ static void UpdateGame(float dt) {
     stepTimer -= dt;
     if (stepTimer > 0) return;
     if (game.toAct < 0) {
+        int before = game.nboard;
         gameAdvance(&game);
+        sndDeal(game.nboard - before);
         stepTimer = BotDelay() * (game.toAct < 0 && !game.handOver ? 1.3f : 0.8f);
     } else {
         Action a = aiDecide(&game, game.toAct, &uiRng);
@@ -1260,7 +1273,7 @@ static const char *HELP_TEXT =
     "An ace can be high (T-J-Q-K-A) or low (A-2-3-4-5) in a straight. Equal hands split the pot.\n\n"
     "CONTROLS\n"
     "F = fold,  C or K = check / call,  R or Enter = bet / raise.  Up / Down arrows or the mouse wheel change the bet size, or drag the slider and use the size presets. "
-    "Space or Enter deals the next hand.  Esc opens the menu,  H this help,  T the glossary,  L the lessons.  In training mode G opens the preflop charts.\n"
+    "Space or Enter deals the next hand.  Esc opens the menu,  H this help,  T the glossary,  L the lessons,  M mutes the sound.  In training mode G opens the preflop charts.\n"
     "Rearrange your own cards any time: drag a card to a new spot, or click one card and then another to swap them. "
     "The Sort button orders them by rank, then by suit (handy in Omaha), and your choice is kept for the next hands.\n\n"
     "TRAINING MODE\n"
@@ -1723,10 +1736,12 @@ static void Frame(void) {
     } else if (IsKeyPressed(KEY_H) && !showMenu && !showGloss) { showHelp = !showHelp; helpScroll = 0; }
     else if (IsKeyPressed(KEY_L) && !overlay && gameMode != MODE_TRAIN) { showLessons = true; helpScroll = 0; }
     else if (IsKeyPressed(KEY_T) && !overlay) OpenGlossary(-1);
+    else if (IsKeyPressed(KEY_M) && !showGloss) { sndSetMuted(!sndMuted()); Flash(sndMuted() ? "Sound off" : "Sound on"); }
     overlay = showMenu || showHelp || showLessons || showChart || showGloss;
     gActive = overlay ? 2 : 0;
 
     if (gameStarted && !overlay) UpdateGame(dt);
+    sndUpdate(dt);
 #ifdef AUTOTEST
     AutoTest();
 #endif
@@ -1788,12 +1803,14 @@ int main(void) {
     hasUI = ok1 && ok2;
     if (!ok2) fReg = fBold;
     rangesInit();
+    sndInit();
 
 #ifdef __EMSCRIPTEN__
     emscripten_set_main_loop(Frame, 0, 1);  // the browser drives the frames; never returns
 #else
     while (!WindowShouldClose()) Frame();
 #endif
+    sndClose();
     CloseWindow();
     return 0;
 }
