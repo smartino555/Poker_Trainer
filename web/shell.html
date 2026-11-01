@@ -49,10 +49,11 @@
   window.addEventListener('unhandledrejection', fail);
   // Keep keyboard shortcuts going to the game after a click (also inside an iframe)
   Module.canvas.addEventListener('mousedown', function () { Module.canvas.focus(); });
-  // Don't let the arrow keys (bet sizing) scroll a parent page when embedded.
+  // Don't let the arrow keys (bet sizing) and paging keys scroll a parent page when embedded.
   // Space is left alone: blocking it would also drop spaces typed into the glossary search.
   window.addEventListener('keydown', function (e) {
-    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].indexOf(e.key) >= 0) e.preventDefault();
+    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown'].indexOf(e.key) >= 0)
+      e.preventDefault();
   });
 </script>
 {{{ SCRIPT }}}
