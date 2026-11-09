@@ -1363,6 +1363,30 @@ static void testDraw(void) {
     gameAdvance(&g);
     CHECK(g.street == 2 && g.betUnit == 20, "after the 2nd draw: big bets (%d)", g.betUnit);
 
+    // the coach's draw in 2-7: K-9-8-4-3 with three draws left keeps the 4-3 every time (noise in the
+    // simulation must not talk it into throwing away a 4 or 3)
+    gameSetup(&g, &cf);
+    g.button = 0;
+    presetDeck(&g, "Kd 2s Ah 9c 5d 6c 8s 7h Td 4c Jc Js 3h Qs 2d");     // seat 1 gets Kd 9c 8s 4c 3h
+    gameNewHand(&g);
+    act(&g, A_CALL, 0); act(&g, A_CALL, 0); act(&g, A_CHECK, 0);
+    gameAdvance(&g);
+    int i4 = -1, i3 = -1, badTip = 0, badBot = 0;
+    for (int i = 0; i < 5; i++) { if (g.s[1].hole[i] == CARD(2, 0)) i4 = i; if (g.s[1].hole[i] == CARD(1, 2)) i3 = i; }
+    CHECK(g.phase == PH_DRAW && g.toAct == 1 && i4 >= 0 && i3 >= 0, "rigged: seat 1 draws first with K-9-8-4-3");
+    int keep43 = 1 << i4 | 1 << i3;
+    for (int seed = 1; seed <= 30; seed++) {
+        Rng r;
+        rngSeed(&r, seed);
+        Tips t;
+        adviseBasic(&g, 1, &t, 1200, &r);
+        if (!t.draw || (t.amount & keep43)) badTip++;
+        Action a = basicBot(&g, 1, LV_HARD, &r);
+        if (a.type != A_DRAW || (a.amount & keep43)) badBot++;
+    }
+    CHECK(badTip == 0, "2-7: the coach keeps the 4-3 from K-9-8-4-3 (threw one away %d times in 30)", badTip);
+    CHECK(badBot == 0, "2-7: the Hard bot keeps the 4-3 from K-9-8-4-3 (threw one away %d times in 30)", badBot);
+
     // six players drawing five cards every time: the deck runs out and the discards are reshuffled,
     // never giving a player back what they just threw away
     GameConfig six = cfgN(6, V_TD27, BL_FIXED, 1000);

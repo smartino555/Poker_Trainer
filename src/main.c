@@ -930,7 +930,7 @@ static void DrawTable(void) {
     char title[96];
     GameTitle(title, sizeof title);
     if (game.mix) { char m[110]; snprintf(m, sizeof m, "%s  -  %s", mixName(game.mix), title); snprintf(title, sizeof title, "%s", m); }
-    TxtC(fBold, title, TCX, TCY + 108, 20, Fade(WHITE, 0.13f));
+    TxtC(fBold, title, TCX, varHasBoard(game.variant) ? TCY + 84 : TCY + 40, 20, Fade(WHITE, 0.13f));    // clear of your bet chips
 
     // the board (board games), or the street / draw in big letters (stud and draw games: no shared cards)
     float cw = 74, ch = 104, gap = 82, x0 = TCX - (gap * 4 + cw) / 2, y = 318;
@@ -1780,10 +1780,10 @@ static void DrawMenu(void) {
     y += 44;
     bool classic = !setMix && aiClassic(setVariant);
     const char *md = setMode == MODE_PLAY ? "Just play against the bots. Press H any time for the rules."
-                   : setMode == MODE_LEARN ? "A rules coach explains every step: forced bets, the deal, who acts, what you may do, who won and why."
+                   : setMode == MODE_LEARN ? "A rules coach explains each step of the hand as it happens."
                    : classic ? "A graded strategy coach (Best ... Blunder) for every decision, plus the rules coach."
-                   : setMix ? "Graded coach in Hold'em and Omaha, strategy tips in the other games, plus the rules coach."
-                             : "Strategy tips for every decision (your share of the pot, the price, what to draw), plus the rules coach.";
+                   : setMix ? "Grades in Hold'em and Omaha, tips in the other games, plus the rules coach."
+                             : "Strategy tips for every decision (no grades), plus the rules coach.";
     Wrap(fReg, md, cx0, y, rw, 14, 18, C_MUTED, true);
     y += 34;
     Txt(fBold, "Opponents", lx, y + 9, 19, C_INK);
@@ -2368,9 +2368,19 @@ static int atFrame = 0, atStage = 0, atShots = 0;
 #ifndef SHOTDIR
 #define SHOTDIR "."
 #endif
-static void Shot(const char *name) { TakeScreenshot(TextFormat("shot_%02d_%s.png", atShots++, name)); }
+static void Shot(const char *name) {
+    char safe[64];
+    int k = 0;
+    for (const char *p = name; *p && k < 63; p++) if (*p != '\'') safe[k++] = *p == ' ' ? '_' : *p;   // raylib refuses ' in file names
+    safe[k] = 0;
+    TakeScreenshot(TextFormat("shot_%02d_%s.png", atShots++, safe));
+}
+static int turnFrames = 0, overFrames = 0, pauseFrames = 0;   // frames since your turn began / the hand ended / Learn mode paused
 static void AutoTest(void) {
     atFrame++;
+    turnFrames = gameStarted && game.toAct == game.human && !game.handOver && !paused ? turnFrames + 1 : 0;
+    overFrames = gameStarted && game.handOver ? overFrames + 1 : 0;
+    pauseFrames = gameStarted && paused ? pauseFrames + 1 : 0;
     speedIdx = 2;
     switch (atStage) {
     case 0: if (atFrame == 20) { Shot("menu"); setMode = MODE_TRAIN; setOpp = 5; setLv[1] = LV_EASY; setLv[3] = LV_HARD; autoDeal = true; StartNewGame(); atStage = 1; atFrame = 0; } break;
@@ -2423,11 +2433,13 @@ static void AutoTest(void) {
         if (t == 9) Shot("drag_mid");
         if (t == 16) fakeDown = false;
         if (t == 18) { ORDER(); printf("AT after drag 1->4: %s\n", o); Shot("drag_done"); }
-        if (t == 20) { fakePos = (Vector2){ HeroSlot(sp, 0).x + 20, HeroSlot(sp, 0).y + 50 }; fakeDown = true; }
+        if (t == 19) fakePos = (Vector2){ HeroSlot(sp, 0).x + 20, HeroSlot(sp, 0).y + 50 };
+        if (t == 20) fakeDown = true;
         if (t == 21) fakeDown = false;
         if (t == 23) Shot("click_selected");
-        if (t == 24) { fakePos = cc; fakeDown = true; }
-        if (t == 25) fakeDown = false;
+        if (t == 24) fakePos = cc;
+        if (t == 25) fakeDown = true;
+        if (t == 26) fakeDown = false;
         if (t == 27) { ORDER(); printf("AT after click-swap 1<->2: %s\n", o); }
         if (t == 29) { sortPref = SORT_SUIT; arrSort(&arr, h->hole, SORT_SUIT); ORDER(); printf("AT sorted by suit: %s\n", o); }
         if (t == 31) { Shot("sorted_suit"); sortPref = SORT_RANK; arrSort(&arr, h->hole, SORT_RANK); ORDER(); printf("AT sorted by rank: %s\n", o); fakeMouse = false; fflush(stdout); atStage = 31; atFrame = 0; }
@@ -2457,8 +2469,8 @@ static void AutoTest(void) {
         break;
     case 51: {
         static int k = 0, ps = 0, ho = 0;
-        if (paused && atFrame > 20) { if (ps++ < 2) Shot("learn_paused"); paused = false; atFrame = 0; }
-        if (game.toAct == game.human && !game.handOver && atFrame > 20) {
+        if (pauseFrames > 20) { if (ps++ < 2) Shot("learn_paused"); paused = false; atFrame = 0; }
+        if (turnFrames > 20) {
             if (k == 0 || k == 3) Shot("learn_turn");
             Legal l;
             gameLegal(&game, &l);
@@ -2466,7 +2478,7 @@ static void AutoTest(void) {
             k++;
             atFrame = 0;
         }
-        if (game.handOver && atFrame > 30) { if (ho++ < 2) Shot("learn_showdown"); NextHand(); atFrame = 0; }
+        if (overFrames > 30) { if (ho++ < 2) Shot("learn_showdown"); NextHand(); atFrame = 0; }
         if (k > 10 || ho > 3 || atFrame > 3000) { atStage = 6; atFrame = 0; }
         break;
     }
@@ -2475,12 +2487,12 @@ static void AutoTest(void) {
         break;
     case 61: {
         static int k = 0, ds = 0, ho = 0;
-        if (game.toAct == game.human && !game.handOver && atFrame > 30 && advKey == DecisionKey()) {
+        if (turnFrames > 20 && advKey == DecisionKey()) {
             Legal l;
             gameLegal(&game, &l);
             if (l.draw) {
-                if (atFrame == 31) arr.marks = tips.amount;
-                if (atFrame == 34) { if (ds++ < 3) Shot("draw_marked"); HumanAct((Action){ A_DRAW, arr.marks }); atFrame = 0; k++; }
+                if (turnFrames == 21) arr.marks = tips.amount;
+                if (turnFrames == 26) { if (ds++ < 3) Shot("draw_marked"); HumanAct((Action){ A_DRAW, arr.marks }); atFrame = 0; k++; }
             } else {
                 if (k == 1 || k == 5) Shot("tips_coach");
                 HumanAct((Action){ tips.act, tips.amount });
@@ -2488,7 +2500,7 @@ static void AutoTest(void) {
                 k++;
             }
         }
-        if (game.handOver && atFrame > 30) { if (ho++ == 0) Shot("draw_handover"); NextHand(); atFrame = 0; }
+        if (overFrames > 30) { if (ho++ == 0) Shot("draw_handover"); NextHand(); atFrame = 0; }
         if (k > 16 || atFrame > 3000) { atStage = 7; atFrame = 0; }
         break;
     }
@@ -2497,16 +2509,16 @@ static void AutoTest(void) {
         break;
     case 71: {
         static int hands = 0, sub = 0;
-        if (game.toAct == game.human && !game.handOver && atFrame > 20 && advKey == DecisionKey()) {
+        if (turnFrames > 20 && advKey == DecisionKey()) {
             Legal l;
             gameLegal(&game, &l);
             HumanAct((Action){ l.canCheck ? A_CHECK : A_CALL, 0 });
             atFrame = 0;
         }
-        if (game.handOver && atFrame > 30) {
+        if (overFrames > 30) {
             bool split = game.showdown && game.pots[0].loMask;
-            if (split && sub == 0) { Shot("hilo_showdown"); panelTab = PT_RULES; sub = 1; atFrame = 26; }
-            else if (split && sub == 1 && atFrame > 29) { Shot("hilo_rules"); panelTab = PT_COACH; sub = 2; }
+            if (split && sub == 0) { Shot("hilo_showdown"); panelTab = PT_RULES; sub = 1; overFrames = 26; }
+            else if (split && sub == 1 && overFrames > 29) { Shot("hilo_rules"); panelTab = PT_COACH; sub = 2; }
             else if (!split || sub == 2) { hands++; NextHand(); atFrame = 0; if (sub == 2) { atStage = 8; atFrame = 0; } }
         }
         if (hands > 40 || atFrame > 3000) { atStage = 8; atFrame = 0; }
@@ -2517,14 +2529,14 @@ static void AutoTest(void) {
         break;
     case 81: {
         static int lastV = -1, games = 0;
-        if (game.toAct == game.human && !game.handOver && atFrame > 20) {
+        if (turnFrames > 20) {
             if (game.variant != lastV) { lastV = game.variant; games++; Shot(TextFormat("horse_%s", varInfo(game.variant)->shortName)); }
             Legal l;
             gameLegal(&game, &l);
             HumanAct((Action){ l.canCheck && !l.bringIn ? A_CHECK : A_CALL, 0 });
             atFrame = 0;
         }
-        if (game.handOver && atFrame > 30) { NextHand(); atFrame = 0; }
+        if (overFrames > 30) { NextHand(); atFrame = 0; }
         if (games > 4 || atFrame > 3000) { OpenHelp(game.variant); atStage = 9; atFrame = 0; }
         break;
     }

@@ -396,14 +396,16 @@ static void drawAdvice(const Game *g, int p, Tips *t, int trials, Rng *rng) {
         int pr = pick < 0 ? -1 : varInfo(g->variant)->rank == RK_BADUGI ? lowR(s->hole[pick]) : cardRank(s->hole[pick]);
         if (pick < 0 || r > pr) pick = i;        // high: the best card thrown away; low: the worst card kept
     }
-    if (pick >= 0 && (high ? __builtin_popcount(h) >= 2 : h != 0)) cand[nc++] = h ^ 1 << pick;
+    // lowball: breaking one more card only makes sense from a near-made hand (it must leave at least two low cards)
+    if (pick >= 0 && (high ? __builtin_popcount(h) >= 2 : h != 0 && n - __builtin_popcount(h) >= 3)) cand[nc++] = h ^ 1 << pick;
     float eq[3];
     int best = 0;
     for (int i = 0; i < nc; i++) {
         bool dup = false;
         for (int j = 0; j < i; j++) dup |= cand[j] == cand[i];
         eq[i] = dup ? -1 : basicEquity(g, p, cand[i], true, trials / 3 + 1, rng);
-        if (eq[i] > eq[best] + 0.01f) best = i;
+        // the simulation is noisy (a few hundred deals): leave the heuristic's draw only for a clear gain
+        if (eq[i] > eq[best] + (best == 0 ? 0.04f : 0.01f)) best = i;
     }
     int m = cand[best];
     t->draw = true;
@@ -530,7 +532,7 @@ Action basicBot(const Game *g, int p, int level, Rng *rng) {
     if (l.draw) {
         if (level == LV_HARD) {
             Tips t;
-            adviseBasic(g, p, &t, 150, rng);
+            adviseBasic(g, p, &t, 400, rng);
             return act(A_DRAW, t.amount);
         }
         int m = basicDrawChoice(g->variant, me->hole, me->nhole, drawsLeft(g, p));

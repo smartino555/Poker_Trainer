@@ -6,7 +6,8 @@
 
 #define RATE 44100
 #define PI_F 3.14159265f
-#define FLICKS 4                 // aliases of the deal sound, so quick flicks can overlap
+#define FLICKS 4                 // aliases of the deal sound, so flicks can overlap
+#define MAXQUEUE 5               // a deal is a few soft flicks, not one per card: 24 in a row sounds like a machine gun
 
 static bool ready = false, muted = false;
 static Sound sDeal, sDealAlias[FLICKS], sWin, sLose;
@@ -34,23 +35,23 @@ static Wave ToWave(float *buf, int n, float peak) {
     return (Wave){ .frameCount = (unsigned)n, .sampleRate = RATE, .sampleSize = 16, .channels = 1, .data = pcm };
 }
 
-// A card sliding off the deck and landing on the felt: a short burst of band-passed noise
-// with a soft low thump at the end.
+// A card sliding across the felt: a soft, dark swish of filtered noise that fades in and out
+// (no sharp attack and no thump, which made a run of cards sound like gunfire).
 static Wave MakeDeal(void) {
     int n;
-    float *b = NewBuf(0.09f, &n);
-    float lp = 0, hp = 0, prev = 0;
+    float *b = NewBuf(0.13f, &n);
+    float lp = 0, lp2 = 0, hp = 0, prev = 0;
     for (int i = 0; i < n; i++) {
         float t = (float)i / RATE;
         float x = Noise();
-        lp += 0.35f * (x - lp);              // low-pass, then high-pass: a papery band around 2-5 kHz
-        hp = 0.8f * (hp + lp - prev);
-        prev = lp;
-        float env = t < 0.004f ? t / 0.004f : expf(-(t - 0.004f) * 55.0f);
-        float thump = t > 0.035f ? sinf(2 * PI_F * 140 * t) * expf(-(t - 0.035f) * 90.0f) * 0.35f : 0;
-        b[i] = hp * env + thump;
+        lp += 0.16f * (x - lp);              // two low-passes, then a high-pass: a soft band around 1-3 kHz
+        lp2 += 0.3f * (lp - lp2);
+        hp = 0.9f * (hp + lp2 - prev);
+        prev = lp2;
+        float env = t < 0.018f ? t / 0.018f : expf(-(t - 0.018f) * 34.0f);
+        b[i] = hp * env;
     }
-    return ToWave(b, n, 0.55f);
+    return ToWave(b, n, 0.3f);
 }
 
 // A cheer: a bright major fanfare over a crowd roar (noise in the voice band, swelling and
@@ -143,16 +144,19 @@ void sndUpdate(float dt) {
     if (flickTimer > 0) return;
     Sound s = sDealAlias[nextFlick];
     nextFlick = (nextFlick + 1) % FLICKS;
-    SetSoundPitch(s, 0.92f + 0.16f * (float)GetRandomValue(0, 100) / 100.0f);   // no two flicks identical
+    float r1 = (float)GetRandomValue(0, 100) / 100.0f, r2 = (float)GetRandomValue(0, 100) / 100.0f;
+    SetSoundPitch(s, 0.88f + 0.24f * r1);          // no two flicks alike ...
+    SetSoundVolume(s, 0.65f + 0.35f * r2);
     PlaySound(s);
     queued--;
-    flickTimer = 0.075f;
+    flickTimer = 0.11f + 0.08f * (float)GetRandomValue(0, 100) / 100.0f;   // ... and unevenly spaced, like a dealer's hand
 }
 
 void sndDeal(int cards) {
     if (!ready || muted || cards <= 0) return;
     if (queued == 0) flickTimer = 0;
     queued += cards;
+    if (queued > MAXQUEUE) queued = MAXQUEUE;
 }
 
 void sndWin(void) {
