@@ -11,6 +11,7 @@
 #   make install-web WEB_DEST=dir   copy the web build into dir (e.g. a site's public/ folder)
 #   make test-wasm  run the test suite compiled to WebAssembly (node, web stack size, overflow checks)
 #   make test-web   browser tests of the web build in headless Chromium (installs Playwright on first use)
+#   make shots      screenshots of every screen into build/shots (AUTOTEST build; needs a display)
 #   make RAYLIB_DIR=/path/to/raylib     use a raylib source checkout (static lib)
 
 CC      ?= cc
@@ -58,6 +59,14 @@ sim: tools/sim.c $(ENGINE) src/*.h
 test: tests/test_main.c $(ENGINE) src/*.h
 	$(CC) $(CFLAGS) -o test_poker tests/test_main.c src/arrange.c src/glossary.c $(ENGINE) -lm
 	./test_poker
+
+# screenshots of every screen (src/main.c AUTOTEST): needs a display, so run it outside any sandbox
+SHOTDIR ?= build/shots
+shots: $(SRC) src/*.h
+	@mkdir -p $(SHOTDIR)
+	$(CC) $(CFLAGS) $(RL_CFLAGS) -DAUTOTEST -DSHOTDIR='"$(abspath $(SHOTDIR))"' -o poker_autotest $(SRC) $(RL_LIBS) $(SYS_LIBS) -lm
+	rm -f $(SHOTDIR)/shot_*.png
+	./poker_autotest
 
 nash: tools/nash.c src/cards.c src/range.c src/*.h
 	$(CC) $(CFLAGS) -o nash tools/nash.c src/cards.c src/range.c -lm
@@ -107,6 +116,6 @@ test-web: web tests/node_modules
 
 clean:
 	rm -f $(TARGET) sim test_poker nash
-	rm -rf $(WEB_OUT) build/test_poker.js build/test_poker.wasm
+	rm -rf $(WEB_OUT) build/test_poker.js build/test_poker.wasm poker_autotest $(SHOTDIR)
 
-.PHONY: all run sim test test-wasm test-web nash web serve-web install-web clean
+.PHONY: all run sim test test-wasm test-web shots nash web serve-web install-web clean

@@ -960,7 +960,8 @@ static void testGlossary(void) {
     // every term the UI's tooltips ask for exists
     const char *ui[] = { "Equity", "Pot odds", "Starting-hand strength (top X%)", "Stack-to-pot ratio (SPR)", "Grades", "Coach recommends",
                          "Hints / Quiz mode", "Mixed strategy", "Leak", "Bot levels", "Heads-up", "HUD", "Under the Gun (UTG)", "Hijack (HJ)",
-                         "Cutoff (CO)", "Button (BTN)", "Small blind (SB)", "Big blind (BB)" };
+                         "Cutoff (CO)", "Button (BTN)", "Small blind (SB)", "Big blind (BB)", "Multiway", "Bring-in", "Open pair", "Fixed limit",
+                         "Coach tips", "Learn the rules mode" };
     for (int i = 0; i < (int)(sizeof ui / sizeof ui[0]); i++) CHECK(glossLookup(ui[i]) >= 0, "tooltip term '%s' exists", ui[i]);
     // all the jargon the coach uses is explained
     const char *jargon[] = { "MDF", "SPR", "stack-to-pot", "c-bet", "continuation bet", "3-bet", "4-bet", "semi-bluff", "implied odds", "pot odds", "equity",
@@ -1091,6 +1092,34 @@ static void testArrange(void) {
     arrSort(&a, h, SORT_SUIT);
     CHECK(cardSuit(h[a.order[0]]) == cardSuit(h[a.order[1]]) && cardSuit(h[a.order[2]]) == cardSuit(h[a.order[3]]), "suit sort groups suits");
     CHECK(cardRank(h[a.order[0]]) > cardRank(h[a.order[1]]) && cardRank(h[a.order[2]]) > cardRank(h[a.order[3]]), "high to low inside a suit");
+
+    // five and seven cards (draw games, stud); more than seven is clamped
+    arrReset(&a, 5);
+    CHECK(a.n == 5 && a.order[4] == 4 && a.marks == 0 && !a.markMode, "five cards");
+    arrMove(&a, 4, 0);
+    CHECK(a.order[0] == 4 && a.order[1] == 0 && a.order[4] == 3, "move the fifth card to the front");
+    arrReset(&a, 9);
+    CHECK(a.n == ARR_MAX && ARR_MAX == 7 && a.order[6] == 6, "clamped to seven cards");
+    int h7[7];
+    cards("2c 9d As 4h Kc 9s 3d", h7, 7);
+    arrSort(&a, h7, SORT_RANK);
+    CHECK(cardRank(h7[a.order[0]]) == 12 && cardRank(h7[a.order[6]]) == 0, "seven cards sort A..2");
+
+    // draw phase: a click marks the card under it for discarding (by hole index); a drag still moves it
+    arrReset(&a, 5);
+    arrMove(&a, 0, 4);                                 // order 1 2 3 4 0
+    a.markMode = true;
+    arrInput(&a, 4, true, true, 0, 0, -1);
+    arrInput(&a, 4, false, false, 0, 0, -1);
+    CHECK(a.marks == 1 && a.sel < 0, "click marks hole card 0 (shown in slot 4), no swap selection (marks %x)", a.marks);
+    arrInput(&a, 1, true, true, 0, 0, -1); arrInput(&a, 1, false, false, 0, 0, -1);
+    CHECK(a.marks == 5, "a second card marked (hole 2)");
+    arrInput(&a, 4, true, true, 0, 0, -1); arrInput(&a, 4, false, false, 0, 0, -1);
+    CHECK(a.marks == 4, "clicking a marked card unmarks it");
+    arrInput(&a, 1, true, true, 0, 0, -1); arrInput(&a, 1, false, true, 60, 0, 3);
+    CHECK(arrInput(&a, 3, false, false, 60, 0, 3) && a.order[3] == 2 && a.marks == 4, "dragging in draw mode moves the card and keeps its mark");
+    arrReset(&a, 5);
+    CHECK(a.marks == 0 && !a.markMode, "reset clears the marks");
     bool seen[4] = { 0 };
     for (int k = 0; k < 4; k++) seen[a.order[k]] = true;
     CHECK(seen[0] && seen[1] && seen[2] && seen[3], "sorting keeps every card exactly once");

@@ -6,10 +6,11 @@
 #define DRAG_START 6.0f     // pointer travel before a press becomes a drag
 
 void arrReset(Arrange *a, int n) {
-    a->n = n < 1 ? 1 : n > 4 ? 4 : n;
-    for (int k = 0; k < 4; k++) a->order[k] = k;
+    a->n = n < 1 ? 1 : n > ARR_MAX ? ARR_MAX : n;
+    for (int k = 0; k < ARR_MAX; k++) a->order[k] = k;
     a->press = a->sel = -1;
-    a->dragging = false;
+    a->dragging = a->markMode = false;
+    a->marks = 0;
 }
 
 void arrMove(Arrange *a, int from, int to) {
@@ -55,7 +56,8 @@ bool arrInput(Arrange *a, int under, bool pressed, bool down, float mx, float my
         if (a->dragging) {
             if (target >= 0 && target != a->press) { arrMove(a, a->press, target); changed = true; }
         } else if (a->press == under) {                  // a click
-            if (a->sel < 0) a->sel = under;
+            if (a->markMode) a->marks ^= 1 << a->order[under];
+            else if (a->sel < 0) a->sel = under;
             else if (a->sel == under) a->sel = -1;
             else { arrSwap(a, a->sel, under); a->sel = -1; changed = true; }
         }

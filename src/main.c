@@ -1,10 +1,13 @@
-// main.c - raylib front end for the Hold'em / Omaha poker trainer
+// main.c - raylib front end for the poker trainer: every game, with the strategy coach and the rules coach
 #include "raylib.h"
 #include "ai.h"
+#include "basic.h"
+#include "rules.h"
 #include "range.h"
 #include "arrange.h"
 #include "glossary.h"
 #include "sound.h"
+#include <ctype.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,7 +25,15 @@
 #define TCX 585          // table centre
 #define TCY 395
 
-enum { MODE_PLAY, MODE_TRAIN };
+enum { MODE_PLAY, MODE_TRAIN, MODE_LEARN };
+enum { PT_COACH, PT_RULES, PT_LOG };      // side panel tabs
+
+// the game picker: Razz has its own tab, but it is a stud game underneath
+enum { TAB_BOARD, TAB_STUD, TAB_RAZZ, TAB_DRAW, TAB_MIXED, NTABS };
+static const char *TAB_NAME[NTABS] = { "Board", "Stud", "Razz", "Draw", "Mixed" };
+static const int TAB_GAMES[NTABS][5] = { { V_HOLDEM, V_OMAHA, V_OMAHA8, V_OMAHA5, V_SHORTDECK }, { V_STUD, V_STUD8 }, { V_RAZZ },
+                                         { V_DRAW5, V_TD27, V_SD27, V_BADUGI }, { MIX_HORSE, MIX_8GAME } };
+static const int TAB_N[NTABS] = { 5, 2, 1, 4, 2 };
 
 // ---------------------------------------------------------------- globals
 
@@ -38,7 +49,8 @@ static Rng uiRng;
 static int gameMode = MODE_PLAY;          // mode of the running game
 
 // settings (menu)
-static int setVariant = V_HOLDEM, setMode = MODE_TRAIN, setLimit = BL_NOLIMIT, setOpp = 5;
+static int setVariant = V_HOLDEM, setMix = MIX_NONE, setMode = MODE_TRAIN, setLimit = BL_NOLIMIT, setOpp = 5;
+static int setTab = TAB_BOARD, tabPick[NTABS];      // tabPick: the game last picked in each tab
 static int setLv[MAXP] = { LV_HUMAN, LV_MEDIUM, LV_MEDIUM, LV_MEDIUM, LV_MEDIUM, LV_MEDIUM };
 static const int BLINDS[][2] = { { 1, 2 }, { 2, 5 }, { 5, 10 }, { 10, 20 }, { 25, 50 }, { 50, 100 }, { 100, 200 }, { 250, 500 } };
 #define NBLINDS 8
@@ -49,7 +61,8 @@ static bool fourColor = false, autoDeal = true, hintsBefore = true;
 static const float SPEEDS[3] = { 1.2f, 0.7f, 0.3f };
 
 static bool showMenu = true, showHelp = false, showLessons = false, showChart = false, showGloss = false;
-static int lessonPage = 0, chartTab = 0, panelTab = 0;
+static int lessonPage = 0, chartTab = 0, panelTab = PT_COACH;
+static int helpPage = -1;                       // rules & help: -1 the app, 0.. a game, V_COUNT + mix - 1 a mixed game
 static float stepTimer = 0, animT = 0, handOverT = 0;
 static float whyScroll = 0, logScroll = 0, helpScroll = 0, glossScroll = 0;
 static int glossCat = -1, glossFocus = -1;      // category filter (-1 all), entry to jump to and highlight
@@ -81,6 +94,23 @@ static const char *LEAK_NAME[LK_N] = {
 };
 static int handsPlayed = 0, biggestPot = 0;
 static bool handCounted = false;          // this hand's result is in the session stats
+
+// basic tips (every game except Hold'em / Omaha): no grades, just whether you played the tip
+static Tips tips, lastTips;
+static bool lastTipsValid = false, lastTipMatch = false;
+static int tipDecisions = 0, tipMatches = 0;
+
+// rules coach: the engine's events for this hand, explained
+#define NNARR 48
+static char narr[NNARR][RULE_LEN];
+static int nnarr = 0, evSeen = 0;          // narration lines this hand; engine events consumed
+static float narrScroll = 0;
+static bool narrFollow = true;             // keep the newest line in view
+static RulesMemory rmem;                   // concepts already explained in full this session
+static bool pauseStreets = true, paused = false;   // Learn mode: stop at each new street until Continue
+static bool sheetSeen[V_COUNT];            // Learn mode: rule sheets already shown this session
+static char ruleTurn[12][RULE_LEN], ruleShow[12][RULE_LEN];
+static int nruleTurn = 0, nruleShow = 0, ruleTurnKey = -1, ruleShowKey = -1;
 
 // hero card arrangement (display order only - the engine never depends on it)
 static Arrange arr;
@@ -326,9 +356,33 @@ static int HeroChips(void) {
 
 static void ResetCoach(void) {
     advKey = -1;
-    lastValid = false;
+    lastValid = lastTipsValid = false;
     lastQ = -1;
     nreview = 0;
+}
+
+static bool UseBasic(void) { return !aiClassic(game.variant); }       // basic tips instead of the graded coach
+static bool IsStud(void) { return varInfo(game.variant)->family == FAM_STUD; }
+static bool IsDraw(void) { return varInfo(game.variant)->family == FAM_DRAW; }
+
+static void OpenHelp(int page) { showHelp = true; helpPage = page; helpScroll = 0; }
+static int MixPage(int mix) { return V_COUNT + mix - 1; }
+
+// the engine's new events, explained by the rules coach (in every mode, so the "first time" memory stays in order)
+static void PumpEvents(void) {
+    if (game.evSeq - evSeen > MAXEV) evSeen = game.evSeq - MAXEV;
+    for (; evSeen < game.evSeq; evSeen++) {
+        char out[RULE_LEN];
+        if (!rulesNarrate(&game, &game.ev[evSeen % MAXEV], &rmem, out, sizeof out)) continue;
+        if (nnarr == NNARR) { memmove(narr[0], narr[1], sizeof narr[0] * (NNARR - 1)); nnarr--; }
+        snprintf(narr[nnarr++], RULE_LEN, "%s", out);
+        narrFollow = true;
+    }
+}
+
+// Learn mode: stop when new cards come so you can read what happened (not while you're the one to act)
+static void LearnPause(void) {
+    if (gameMode == MODE_LEARN && pauseStreets && !game.handOver && game.s[game.human].inHand && game.toAct != game.human) paused = true;
 }
 
 // Seed material. GetTime() only counts from startup (and browsers coarsen it), so on its
@@ -343,16 +397,20 @@ static uint64_t Entropy(void) {
 }
 
 static void DealHoleCards(void) {
+    nnarr = 0;
+    narrScroll = 0;
+    paused = false;
     gameNewHand(&game);
-    int dealt = 0;
-    for (int i = 0; i < game.n; i++) if (game.s[i].inHand) dealt++;
-    sndDeal(dealt * holeCount(&game));
+    PumpEvents();
+    sndDeal(game.dpos);                  // every card dealt so far came off the stock
+    LearnPause();
 }
 
 static void StartNewGame(void) {
     GameConfig cfg = { 0 };
     cfg.variant = setVariant;
     cfg.limit = setLimit;
+    cfg.mix = setMix;
     cfg.n = setOpp + 1;
     for (int i = 0; i < MAXP; i++) cfg.levels[i] = i == 0 ? LV_HUMAN : setLv[i];
     cfg.sb = BLINDS[blindIdx][0];
@@ -365,11 +423,15 @@ static void StartNewGame(void) {
     gameMode = setMode;
     gameStarted = true;
     showMenu = false;
-    decisions = handsPlayed = biggestPot = 0;
+    decisions = handsPlayed = biggestPot = tipDecisions = tipMatches = 0;
     memset(qCount, 0, sizeof qCount);
     memset(leaks, 0, sizeof leaks);
+    memset(&rmem, 0, sizeof rmem);
+    memset(sheetSeen, 0, sizeof sheetSeen);
+    evSeen = 0;
     ResetCoach();
-    panelTab = gameMode == MODE_TRAIN ? 0 : 1;
+    panelTab = gameMode == MODE_TRAIN ? PT_COACH : gameMode == MODE_LEARN ? PT_RULES : PT_LOG;
+    if (gameMode == MODE_LEARN && game.mix) OpenHelp(MixPage(game.mix));   // then each game's sheet as it comes up
     DealHoleCards();
     stepTimer = BotDelay();
     handOverT = 0;
@@ -396,12 +458,25 @@ static void Rebuy(void) {
 
 static int DecisionKey(void) { return game.handNo * 1000 + game.nActs; }
 
+// fixed limit: the raise-to amount the engine will use (an open pair on 4th street offers the small or the big bet)
+static int FixedTo(const Legal *l, int amount) { return l->maxTo > l->minTo && amount < l->maxTo ? l->minTo : l->maxTo; }
+
 static void EnsureAdvice(void) {
     if (gameMode != MODE_TRAIN || game.toAct != game.human || game.handOver) return;
     int key = DecisionKey();
     if (advKey == key) return;
-    advise(&game, game.human, &adv, 2500, &uiRng);
-    nthink = thinkPrompts(&game, game.human, think);
+    if (UseBasic()) adviseBasic(&game, game.human, &tips, 1200, &uiRng);
+    else {
+        advise(&game, game.human, &adv, 2500, &uiRng);
+        if (gameIsFixed(&game)) {                // limit Hold'em / Omaha: the rules set the size, so only the action counts
+            Legal l;
+            gameLegal(&game, &l);
+            if (adv.act == A_RAISE) snprintf(adv.head, sizeof adv.head, "%s %s", game.curBet == 0 ? "Bet" : "Raise to", Money(l.maxTo));
+            adv.lo = adv.hi = 0;
+            adv.aggAmount = l.maxTo;
+        }
+        nthink = thinkPrompts(&game, game.human, think);
+    }
     advKey = key;
     whyScroll = 0;
 }
@@ -409,11 +484,57 @@ static void EnsureAdvice(void) {
 static void ActionText(const Game *g, Action a, char *buf, int n) {
     Legal l;
     gameLegal(g, &l);
+    if (l.draw) {
+        int k = __builtin_popcount(a.amount & ((1 << g->s[g->toAct].nhole) - 1));
+        if (k) snprintf(buf, n, "Draw %d", k); else snprintf(buf, n, "Stand pat");
+        return;
+    }
+    if (l.bringIn) {
+        if (a.type == A_RAISE && l.canRaise) snprintf(buf, n, "Complete to %s", Money(l.minTo));
+        else snprintf(buf, n, "Bring in %s", Money(l.toCall));
+        return;
+    }
+    if (a.type == A_FOLD && l.canCheck) a.type = A_CHECK;
     switch (a.type) {
     case A_FOLD: snprintf(buf, n, "Fold"); break;
     case A_CHECK: snprintf(buf, n, "Check"); break;
     case A_CALL: snprintf(buf, n, "Call %s", Money(l.toCall)); break;
-    default: snprintf(buf, n, "%s %s", g->curBet == 0 ? "Bet" : "Raise to", Money(a.amount)); break;
+    default: snprintf(buf, n, "%s %s", g->curBet == 0 ? "Bet" : "Raise to", Money(gameIsFixed(g) ? FixedTo(&l, a.amount) : a.amount)); break;
+    }
+}
+
+// basic tips: no grade, just whether you did what the tip said (in a draw, the same cards)
+static bool SameAsTip(const Legal *l, Action a, const Tips *t) {
+    if (l->draw) return a.amount == t->amount;
+    int x = a.type, y = t->act;
+    if (x == A_FOLD && l->canCheck) x = A_CHECK;
+    if (y == A_FOLD && l->canCheck) y = A_CHECK;
+    return x == y;
+}
+
+static void NoteTip(Action a) {
+    if (gameMode != MODE_TRAIN || advKey != DecisionKey()) return;
+    Legal l;
+    gameLegal(&game, &l);
+    bool same = SameAsTip(&l, a, &tips);
+    tipDecisions++;
+    tipMatches += same;
+    lastTips = tips;
+    lastTipsValid = true;
+    lastTipMatch = same;
+    ActionText(&game, a, lastDid, sizeof lastDid);
+    if (nreview < 24) {
+        Review *r = &review[nreview++];
+        r->street = game.phase == PH_DRAW ? 100 + game.drawNo : game.street;
+        snprintf(r->did, sizeof r->did, "%s", lastDid);
+        snprintf(r->best, sizeof r->best, "%s", tips.head);
+        r->q = same ? -1 : -2;
+    }
+    if (!hintsBefore || !same) {
+        char m[160];
+        if (same) snprintf(m, sizeof m, "%s  -  same as the coach", lastDid);
+        else snprintf(m, sizeof m, "You: %s  -  coach: %s", lastDid, tips.head);
+        Flash(m);
     }
 }
 
@@ -425,7 +546,7 @@ static void GradeHuman(Action a) {
     int q = adv.q[a.type];
     if (q < 0) q = Q_MISTAKE;
     lastNote[0] = 0;
-    if (a.type == A_RAISE && q <= Q_GOOD && adv.lo > 0 && (a.amount < adv.lo || a.amount > adv.hi)) {
+    if (a.type == A_RAISE && q <= Q_GOOD && !gameIsFixed(&game) && adv.lo > 0 && (a.amount < adv.lo || a.amount > adv.hi)) {
         bool allin = a.amount >= game.s[game.human].stack + game.s[game.human].bet;
         bool recAllin = adv.aggAmount >= game.s[game.human].stack + game.s[game.human].bet;
         if (!(allin && recAllin)) {
@@ -472,8 +593,11 @@ static void GradeHuman(Action a) {
 
 static void HumanAct(Action a) {
     EnsureAdvice();
-    GradeHuman(a);
+    if (UseBasic()) NoteTip(a); else GradeHuman(a);
+    int before = game.dpos;
     gameAct(&game, a);
+    if (game.dpos > before) sndDeal(game.dpos - before);     // the cards you drew
+    arr.marks = 0;
     stepTimer = BotDelay();
 }
 
@@ -490,23 +614,27 @@ static void UpdateGame(float dt) {
             else if (h->won < h->total && h->inHand) sndLose();   // folding is your own choice: no jeer
         }
         handOverT += dt;
-        float wait = gameMode == MODE_TRAIN ? 9999 : game.showdown ? 4.0f : 2.2f;
+        float wait = gameMode != MODE_PLAY ? 9999 : game.showdown ? 4.0f : 2.2f;   // the coaches wait for you
         if (autoDeal && handOverT > wait && game.s[game.human].stack > 0) NextHand();
         return;
     }
+    if (paused) return;
     if (game.toAct == game.human) { EnsureAdvice(); return; }
     stepTimer -= dt;
     if (stepTimer > 0) return;
+    int before = game.dpos;
     if (game.toAct < 0) {
-        int before = game.nboard;
+        bool fromDraw = game.phase == PH_DRAW;   // a draw just ended: nothing new to read, so no pause
         gameAdvance(&game);
-        sndDeal(game.nboard - before);
         stepTimer = BotDelay() * (game.toAct < 0 && !game.handOver ? 1.3f : 0.8f);
+        PumpEvents();
+        if (!fromDraw) LearnPause();
     } else {
         Action a = aiDecide(&game, game.toAct, &uiRng);
         gameAct(&game, a);
         stepTimer = BotDelay();
     }
+    if (game.dpos > before) sndDeal(game.dpos - before);
     if (game.handOver) handOverT = 0;
     EnsureAdvice();
 }
@@ -521,32 +649,81 @@ static int SpotFor(int seat) {
 
 static void ActLabel(const Seat *s, char *buf, int n) {
     buf[0] = 0;
+    bool third = IsStud() && game.street == 0;          // stud's bring-in round
     switch (s->lastAct) {
     case A_FOLD: snprintf(buf, n, "Fold"); break;
     case A_CHECK: snprintf(buf, n, "Check"); break;
-    case A_CALL: snprintf(buf, n, s->allin ? "Call - All-in" : "Call"); break;
-    case A_RAISE: snprintf(buf, n, s->allin ? "All-in" : s->lastBet ? "Bet" : "Raise"); break;
+    case A_CALL:
+        if (third && s - game.s == game.bringInSeat && s->bet == game.bringIn) snprintf(buf, n, "Bring-in");
+        else snprintf(buf, n, s->allin ? "Call - All-in" : "Call");
+        break;
+    case A_RAISE: snprintf(buf, n, s->allin ? "All-in" : third && s->bet == game.smallBet ? "Complete" : s->lastBet ? "Bet" : "Raise"); break;
+    case A_DRAW: {
+        int d = game.drawNo < 3 ? s->drew[game.drawNo] : -1;
+        if (d == 0) snprintf(buf, n, "Stand pat");
+        else if (d > 0) snprintf(buf, n, "Drew %d", d);
+        break;
+    }
     }
 }
 
+// your cards: stud keeps 7 fixed slots (cards don't shift as streets are dealt); later cards overlap earlier ones
 static Rectangle HeroSlot(Vector2 sp, int k) {
-    int hc = holeCount(&game);
-    float cw = hc == 2 ? 86 : 74, ch = hc == 2 ? 120 : 104, gap = hc == 2 ? 94 : 66;
-    float x0 = sp.x - (gap * (hc - 1) + cw) / 2;
-    return (Rectangle){ x0 + k * gap, sp.y - 160 + (hc == 4 ? 14 : 0), cw, ch };
+    int n = game.s[game.human].nhole;
+    float cw, ch, gap, dy = 0;
+    if (IsStud()) { cw = 64; ch = 90; gap = 56; dy = 22; n = 7; }
+    else if (n <= 2) { cw = 86; ch = 120; gap = 94; }
+    else if (n == 4) { cw = 74; ch = 104; gap = 66; dy = 14; }
+    else { cw = 72; ch = 101; gap = 78; dy = 16; }       // five cards
+    float x0 = sp.x - (gap * (n - 1) + cw) / 2;
+    return (Rectangle){ x0 + k * gap, sp.y - 160 + dy, cw, ch };
 }
 
-// draws your cards and lets you rearrange them: drag a card, or click two cards to swap them
+// cards drawn so far in a draw game: "drew 3, 1, pat"
+static void DrawHistory(const Seat *s, char *buf, int n) {
+    buf[0] = 0;
+    for (int d = 0; d < varInfo(game.variant)->draws && d < 3; d++) {
+        if (s->drew[d] < 0) break;
+        size_t l = strlen(buf);
+        snprintf(buf + l, n - l, "%s%s", d ? ", " : "drew ", s->drew[d] == 0 ? "pat" : TextFormat("%d", s->drew[d]));
+    }
+}
+
+static void DownTag(Rectangle r) {          // stud: a card only its owner can see
+    Rectangle t = { r.x + r.width / 2 - 24, r.y + r.height - 21, 48, 17 };
+    DrawRectangleRounded(t, 0.5f, 6, Fade((Color){ 30, 40, 60, 255 }, 0.85f));
+    TxtC(fBold, "DOWN", t.x + t.width / 2, t.y + 2, 12, WHITE);
+}
+
+// draws your cards and lets you rearrange them: drag a card, or click two cards to swap them.
+// In a draw, a click marks the card to throw away instead. Stud cards stay in the order they were dealt.
 static void HeroCards(const Seat *s, Vector2 sp) {
-    int hc = holeCount(&game);
-    if (orderHand != game.handNo) {
+    int n = s->nhole;
+    if (n <= 0) return;
+    bool stud = IsStud(), dim = !s->inHand && !game.handOver;
+    if (stud) {
+        for (int k = 0; k < n; k++) {
+            Rectangle r = HeroSlot(sp, k);
+            bool down = !(s->upMask >> k & 1);
+            DrawCard(s->hole[k], r, dim, false);
+            if (down && !game.handOver) DownTag(r);
+        }
+        Rectangle first = HeroSlot(sp, 0);
+        TxtR(fReg, "DOWN = only you", first.x - 12, first.y + 30, 13, C_DIM);
+        TxtR(fReg, "see these cards", first.x - 12, first.y + 47, 13, C_DIM);
+        return;
+    }
+    if (orderHand != game.handNo || arr.n != n) {
         orderHand = game.handNo;
-        arrReset(&arr, hc);
+        arrReset(&arr, n);
         arrSort(&arr, s->hole, sortPref);
     }
+    bool drawing = game.phase == PH_DRAW && game.toAct == game.human && !game.handOver;
+    arr.markMode = drawing;
+    if (!drawing) arr.marks = 0;
     bool active = gLayer == gActive;
     int under = -1;
-    for (int k = hc - 1; k >= 0 && active; k--)          // later cards overlap earlier ones
+    for (int k = n - 1; k >= 0 && active; k--)            // later cards overlap earlier ones
         if (CheckCollisionPointRec(mouse, HeroSlot(sp, k))) { under = k; break; }
     bool pressed = active && MPressed();
     if (pressed && under >= 0) {
@@ -556,7 +733,7 @@ static void HeroCards(const Seat *s, Vector2 sp) {
     int target = -1;                                      // slot the dragged card would land in
     if (arr.dragging) {
         float cx = mouse.x - cardGrab.x + HeroSlot(sp, 0).width / 2, best = 1e9f;
-        for (int k = 0; k < hc; k++) {
+        for (int k = 0; k < n; k++) {
             Rectangle r = HeroSlot(sp, k);
             float d = fabsf(r.x + r.width / 2 - cx);
             if (d < best) { best = d; target = k; }
@@ -565,11 +742,12 @@ static void HeroCards(const Seat *s, Vector2 sp) {
     int dragged = arr.press;
     arrInput(&arr, under, pressed, MDown(), mouse.x, mouse.y, target);
     if (arr.dragging && target < 0) target = dragged;    // the drag only just started
-    bool dim = !s->inHand && !game.handOver;
+    // the coach's discards (training, hints on)
+    int coachMask = drawing && gameMode == MODE_TRAIN && hintsBefore && advKey == DecisionKey() && tips.draw ? tips.amount : 0;
     if (arr.dragging) {
-        int rest[4], n = 0;                               // order with the dragged card moved to the target
-        for (int k = 0; k < hc; k++) if (k != dragged) rest[n++] = arr.order[k];
-        for (int k = 0, j = 0; k < hc; k++) {
+        int rest[ARR_MAX], m = 0;                         // order with the dragged card moved to the target
+        for (int k = 0; k < n; k++) if (k != dragged) rest[m++] = arr.order[k];
+        for (int k = 0, j = 0; k < n; k++) {
             if (k == target) continue;
             DrawCard(s->hole[rest[j++]], HeroSlot(sp, k), dim, false);
         }
@@ -579,23 +757,46 @@ static void HeroCards(const Seat *s, Vector2 sp) {
         r.y = mouse.y - cardGrab.y - 10;
         DrawCard(s->hole[arr.order[dragged]], r, dim, true);
     } else {
-        for (int k = 0; k < hc; k++) {
+        for (int k = 0; k < n; k++) {
             Rectangle r = HeroSlot(sp, k);
-            if (k == arr.sel) r.y -= 16;
+            int h = arr.order[k];
+            bool marked = drawing && (arr.marks >> h & 1);
+            if (marked) r.y -= 26;
+            else if (k == arr.sel) r.y -= 16;
             else if (k == under) r.y -= 5;
-            DrawCard(s->hole[arr.order[k]], r, dim, k == arr.sel);
+            DrawCard(s->hole[h], r, dim || marked, k == arr.sel);
+            if (coachMask >> h & 1) DrawRectangleRoundedLinesEx((Rectangle){ r.x - 3, r.y - 3, r.width + 6, r.height + 6 }, 0.14f, 6, 3, (Color){ 90, 230, 140, 255 });
+            if (marked) {
+                Rectangle t = { r.x + r.width / 2 - 30, r.y + r.height / 2 - 11, 60, 22 };
+                DrawRectangleRounded(t, 0.5f, 6, C_RED);
+                TxtC(fBold, "TOSS", t.x + t.width / 2, t.y + 4, 14, WHITE);
+            }
         }
     }
-    // sort button and hint, left of the cards
-    Rectangle first = HeroSlot(sp, 0);
+    // sort button and hint, left of the cards; what you drew, right of them
+    Rectangle first = HeroSlot(sp, 0), last = HeroSlot(sp, n - 1);
     static const char *SORT_LBL[3] = { "Sort", "By suit", "By rank" };
     Rectangle sb = { first.x - 86, first.y + first.height / 2 - 16, 74, 32 };
     if (Button(sb, SORT_LBL[sortPref + 1], true, (Color){ 60, 66, 80, 255 })) {
         sortPref = sortPref == SORT_RANK ? SORT_SUIT : SORT_RANK;
         arrSort(&arr, s->hole, sortPref);
     }
-    if (under >= 0 && !arr.dragging)
+    if (drawing && !arr.dragging) TxtR(fReg, "click cards to throw away", first.x - 12, sb.y + 40, 13, C_GOLD);
+    else if (under >= 0 && !arr.dragging)
         TxtR(fReg, arr.sel >= 0 ? "click another card to swap" : "drag to rearrange", first.x - 12, sb.y + 40, 13, C_DIM);
+    if (IsDraw()) {
+        char dh[40];
+        DrawHistory(s, dh, sizeof dh);
+        if (dh[0]) Txt(fReg, dh, last.x + last.width + 14, last.y + last.height / 2 - 8, 15, C_DIM);
+    }
+}
+
+static void ShowdownLabel(const Seat *s, char *buf, int n) {
+    char hn[64], ln[40];
+    handNameV(game.variant, s->value, hn, sizeof hn);
+    if (!varIsSplit(game.variant)) { snprintf(buf, n, "%s", hn); return; }
+    if (s->low) lowName(s->low, ln, sizeof ln); else snprintf(ln, sizeof ln, "no low");
+    snprintf(buf, n, "%s / %s", hn, ln);
 }
 
 static void DrawSeat(int i) {
@@ -603,19 +804,32 @@ static void DrawSeat(int i) {
     Vector2 sp = SPOT[SpotFor(i)];
     bool hero = i == game.human;
     bool top = sp.y < 300;
-    int hc = holeCount(&game);
+    bool stud = IsStud();
+    int n = s->nhole;
     bool showAll = game.handOver && gameMode == MODE_TRAIN;
-    // hole cards
-    if (hero || s->total > 0 || s->inHand || game.handOver) {
-        if (hero) HeroCards(s, sp);
-        else if (s->inHand || (showAll && s->stack + s->total > 0)) {
-            float cw = 44, ch = 62, gap = hc == 2 ? 48 : 30;
-            float x0 = sp.x - (gap * (hc - 1) + cw) / 2, y = top ? sp.y + 36 : sp.y - 36 - ch;
-            bool face = s->shown || showAll;
-            for (int k = 0; k < hc; k++) {
-                Rectangle r = { x0 + k * gap, y, cw, ch };
-                if (face) DrawCard(s->hole[k], r, !s->inHand, false);
-                else DrawCardBack(r);
+    // cards: down cards as backs; in stud the up cards face up, and a folded hand's up cards stay as dead cards
+    if (hero) HeroCards(s, sp);
+    else if (n > 0 && (s->inHand || (showAll && s->stack + s->total > 0) || (stud && s->upMask))) {
+        float cw = 44, ch = 62, gap = n <= 2 ? 48 : 30;
+        int slots = n;
+        if (stud) { cw = 40; ch = 56; gap = 37; slots = 7; }
+        float x0 = sp.x - (gap * (slots - 1) + cw) / 2, y = top ? sp.y + 36 : sp.y - 36 - ch;
+        bool open = s->shown || showAll;
+        for (int k = 0; k < n; k++) {
+            bool up = stud && (s->upMask >> k & 1);
+            if (!s->inHand && !open && !up) continue;
+            Rectangle r = { x0 + k * gap, y, cw, ch };
+            if (open || up) DrawCard(s->hole[k], r, !s->inHand, false);
+            else DrawCardBack(r);
+        }
+        if (IsDraw() && s->inHand) {
+            char dh[40];
+            DrawHistory(s, dh, sizeof dh);
+            if (dh[0]) {
+                float dx = x0 + gap * (slots - 1) + cw + 8, w = TxtW(fReg, dh, 14) + 12;
+                if (sp.x > TCX) dx = x0 - 8 - w;          // right-hand seats: on the inside, away from the panel
+                DrawRectangleRounded((Rectangle){ dx, y + ch / 2 - 11, w, 22 }, 0.5f, 6, Fade(BLACK, 0.5f));
+                Txt(fReg, dh, dx + 6, y + ch / 2 - 8, 14, C_TEXT);
             }
         }
     }
@@ -641,7 +855,12 @@ static void DrawSeat(int i) {
     }
     Txt(fBold, Money(s->stack), box.x + 14, box.y + 32, 19, s->stack > 0 ? C_GOLD : C_DIM);
     const char *pn = posName(&game, i);
-    if (strcmp(pn, "BTN") != 0 || game.n == 2) {
+    if (stud) {                                            // no blinds in stud: mark who brought in instead
+        if (i == game.bringInSeat && game.street == 0 && !game.handOver) {
+            TxtR(fReg, "bring-in", box.x + box.width - 12, box.y + 35, 15, C_DIM);
+            Tip((Rectangle){ box.x + box.width - 70, box.y + 33, 58, 20 }, "Bring-in");
+        }
+    } else if (strcmp(pn, "BTN") != 0 || game.n == 2) {
         const char *lbl = game.n == 2 ? (i == game.button ? "BTN/SB" : "BB") : pn;
         TxtR(fReg, lbl, box.x + box.width - 12, box.y + 35, 15, C_DIM);
         static const char *PT[6] = { "Under the Gun (UTG)", "Hijack (HJ)", "Cutoff (CO)", "Button (BTN)", "Small blind (SB)", "Big blind (BB)" };
@@ -652,6 +871,7 @@ static void DrawSeat(int i) {
     if (i == game.button) {
         Vector2 d = { sp.x + (TCX - sp.x) * 0.16f + (sp.x < TCX ? 30 : sp.x > TCX ? -30 : 110), sp.y + (TCY - sp.y) * 0.22f };
         if (hero) d = (Vector2){ sp.x + 130, sp.y - 30 };
+        if (stud && !hero) d.y += top ? 70 : -86;        // clear of the up cards
         DrawCircleV((Vector2){ d.x + 1, d.y + 2 }, 13, Fade(BLACK, 0.4f));
         DrawCircleV(d, 13, (Color){ 250, 250, 245, 255 });
         Tip((Rectangle){ d.x - 13, d.y - 13, 26, 26 }, "Button (BTN)");
@@ -661,20 +881,20 @@ static void DrawSeat(int i) {
     // last action tag
     char al[32];
     ActLabel(s, al, sizeof al);
+    float tagY = hero ? box.y + box.height + 4 : top ? box.y + box.height + (stud ? 66 : 72) : box.y - (stud ? 102 : 108);
     if (al[0] && !game.handOver) {
         float w = TxtW(fBold, al, 14) + 16;
-        float ty = hero ? box.y + box.height + 4 : top ? box.y + box.height + 72 : box.y - 108;
-        Color tc = s->lastAct == A_FOLD ? (Color){ 110, 110, 116, 255 } : s->lastAct == A_RAISE ? (Color){ 200, 90, 40, 255 } : (Color){ 60, 120, 180, 255 };
-        DrawRectangleRounded((Rectangle){ sp.x - w / 2, ty, w, 22 }, 0.5f, 6, tc);
-        TxtC(fBold, al, sp.x, ty + 3, 14, WHITE);
+        Color tc = s->lastAct == A_FOLD ? (Color){ 110, 110, 116, 255 } : s->lastAct == A_RAISE ? (Color){ 200, 90, 40, 255 }
+                 : s->lastAct == A_DRAW ? (Color){ 120, 80, 160, 255 } : (Color){ 60, 120, 180, 255 };
+        DrawRectangleRounded((Rectangle){ sp.x - w / 2, tagY, w, 22 }, 0.5f, 6, tc);
+        TxtC(fBold, al, sp.x, tagY + 3, 14, WHITE);
     }
     if (game.handOver && s->shown && s->inHand && s->value) {
-        char hn[64];
-        handName(s->value, hn, sizeof hn);
-        float ty = hero ? box.y + box.height + 4 : top ? box.y + box.height + 72 : box.y - 108;
+        char hn[110];
+        ShowdownLabel(s, hn, sizeof hn);
         float w = TxtW(fBold, hn, 14) + 16;
-        DrawRectangleRounded((Rectangle){ sp.x - w / 2, ty, w, 22 }, 0.5f, 6, winner ? (Color){ 190, 140, 30, 255 } : (Color){ 50, 56, 66, 255 });
-        TxtC(fBold, hn, sp.x, ty + 3, 14, WHITE);
+        DrawRectangleRounded((Rectangle){ sp.x - w / 2, tagY, w, 22 }, 0.5f, 6, winner ? (Color){ 190, 140, 30, 255 } : (Color){ 50, 56, 66, 255 });
+        TxtC(fBold, hn, sp.x, tagY + 3, 14, WHITE);
     }
     // HUD stats in training mode
     if (gameMode == MODE_TRAIN && !hero && s->st.hands >= 5) {
@@ -688,8 +908,15 @@ static void DrawSeat(int i) {
     // chips in front
     if (s->bet > 0) {
         Vector2 b = hero ? (Vector2){ TCX - 20, 520 } : (Vector2){ sp.x + (TCX - sp.x) * 0.42f - 20, sp.y + (TCY - sp.y) * (top ? 0.5f : 0.4f) };
+        if (stud && !hero) b.y += top ? 12 : -52;          // below / above the longer row of up cards
         DrawChips(b.x, b.y, s->bet);
     }
+}
+
+// "FIXED-LIMIT SEVEN-CARD STUD"
+static void GameTitle(char *buf, int n) {
+    snprintf(buf, n, "%s %s", limitName(game.limit), varInfo(game.variant)->name);
+    for (char *p = buf; *p; p++) *p = (char)toupper((unsigned char)*p);
 }
 
 static void DrawTable(void) {
@@ -700,16 +927,25 @@ static void DrawTable(void) {
     DrawRectangleRounded((Rectangle){ t.x + 30, t.y + 30, t.width - 60, t.height - 60 }, 1.0f, 64, C_FELT2);
     DrawRectangleRounded((Rectangle){ t.x + 44, t.y + 44, t.width - 88, t.height - 88 }, 1.0f, 64, C_FELT);
     DrawRectangleRoundedLinesEx((Rectangle){ TCX - 340, TCY - 165, 680, 330 }, 1.0f, 64, 2, Fade(WHITE, 0.07f));
-    const char *title = game.variant == V_OMAHA ? (game.limit == BL_POTLIMIT ? "POT-LIMIT OMAHA" : "NO-LIMIT OMAHA")
-                                                : (game.limit == BL_POTLIMIT ? "POT-LIMIT HOLD'EM" : "NO-LIMIT HOLD'EM");
+    char title[96];
+    GameTitle(title, sizeof title);
+    if (game.mix) { char m[110]; snprintf(m, sizeof m, "%s  -  %s", mixName(game.mix), title); snprintf(title, sizeof title, "%s", m); }
     TxtC(fBold, title, TCX, TCY + 108, 20, Fade(WHITE, 0.13f));
 
-    // board
+    // the board (board games), or the street / draw in big letters (stud and draw games: no shared cards)
     float cw = 74, ch = 104, gap = 82, x0 = TCX - (gap * 4 + cw) / 2, y = 318;
-    for (int i = 0; i < 5; i++) {
-        Rectangle r = { x0 + i * gap, y, cw, ch };
-        if (i < game.nboard) DrawCard(game.board[i], r, false, false);
-        else DrawRectangleRoundedLinesEx(r, 0.14f, 6, 1.5f, Fade(WHITE, 0.12f));
+    if (varHasBoard(game.variant)) {
+        for (int i = 0; i < 5; i++) {
+            Rectangle r = { x0 + i * gap, y, cw, ch };
+            if (i < game.nboard) DrawCard(game.board[i], r, false, false);
+            else DrawRectangleRoundedLinesEx(r, 0.14f, 6, 1.5f, Fade(WHITE, 0.12f));
+        }
+    } else if (!game.handOver) {
+        static const char *DN[3] = { "First draw", "Second draw", "Third draw" };
+        const char *st = game.phase == PH_DRAW ? (varInfo(game.variant)->draws == 1 ? "The draw" : DN[game.drawNo < 3 ? game.drawNo : 2])
+                                               : streetName(&game, game.street);
+        TxtC(fBold, st, TCX, y + 30, 34, Fade(WHITE, 0.22f));
+        TxtC(fReg, IsStud() ? "no shared cards: each player has their own" : "no shared cards: nobody sees anyone's hand", TCX, y + 76, 15, Fade(WHITE, 0.2f));
     }
     // pot
     int pot = gamePot(&game), bets = 0;
@@ -729,12 +965,14 @@ static void DrawTable(void) {
     for (int i = 0; i < game.n; i++) DrawSeat(i);
 
     if (game.handOver && game.winText[0]) {
-        float ww = TxtW(fBold, game.winText, 21) + 40;
+        float sz = 21;
+        while (sz > 14 && TxtW(fBold, game.winText, sz) > 900) sz -= 1;        // hi-lo results run long
+        float ww = TxtW(fBold, game.winText, sz) + 40;
         Rectangle b = { TCX - ww / 2, 438, ww, 40 };
         DrawRectangleRounded((Rectangle){ b.x, b.y + 3, b.width, b.height }, 0.5f, 8, Fade(BLACK, 0.4f));
         DrawRectangleRounded(b, 0.5f, 8, (Color){ 20, 26, 34, 235 });
         DrawRectangleRoundedLinesEx(b, 0.5f, 8, 2, C_GOLD);
-        TxtC(fBold, game.winText, TCX, b.y + 10, 21, WHITE);
+        TxtC(fBold, game.winText, TCX, b.y + (40 - sz) / 2, sz, WHITE);
     }
 }
 
@@ -749,6 +987,97 @@ static int Snap(int v, const Legal *l) {
     if (v < l->minTo) v = l->minTo;
     if (v > l->maxTo) v = l->maxTo;
     return v;
+}
+
+// the coach's pick for this decision, when hints are showing (-1 otherwise)
+static int CoachPick(void) {
+    if (gameMode != MODE_TRAIN || !hintsBefore || advKey != DecisionKey()) return -1;
+    return UseBasic() ? tips.act : adv.act;
+}
+
+static void PickGlow(Rectangle hl) {
+    float a = 0.5f + 0.5f * sinf(animT * 4);
+    DrawRectangleRoundedLinesEx((Rectangle){ hl.x - 5, hl.y - 5, hl.width + 10, hl.height + 10 }, 0.35f, 8, 3, Fade((Color){ 90, 230, 140, 255 }, 0.5f + 0.5f * a));
+}
+
+static void ControlNote(const char *text, float x, float y, float w) { Wrap(fReg, text, x, y, w, 15, 20, C_DIM, true); }
+
+// a draw: mark cards (click them, or press 1-5), then draw; standing pat keeps them all
+static void DrawDrawControls(Rectangle bar) {
+    const Seat *h = &game.s[game.human];
+    int n = h->nhole, marks = arr.marks & ((1 << n) - 1), k = __builtin_popcount(marks);
+    for (int i = 0; i < n && i < 5; i++)
+        if (KeyHit(KEY_ONE + i)) arr.marks ^= 1 << arr.order[i];
+    float bx = bar.x + 20, by = bar.y + 16, bh = 72;
+    Rectangle rp = { bx, by, 170, bh }, rd = { bx + 182, by, 250, bh };
+    if (CoachPick() == A_DRAW) PickGlow(tips.amount ? rd : rp);
+    if (Button(rp, "Stand pat", true, (Color){ 46, 110, 190, 255 }) || KeyHit(KEY_P) || (k == 0 && KeyHit(KEY_ENTER))) { HumanAct((Action){ A_DRAW, 0 }); return; }
+    char lbl[64];
+    if (k) snprintf(lbl, sizeof lbl, "Draw %d", k); else snprintf(lbl, sizeof lbl, "Draw (mark cards)");
+    if (Button(rd, lbl, k > 0, (Color){ 190, 100, 40, 255 }) || (k > 0 && (KeyHit(KEY_D) || KeyHit(KEY_ENTER)))) { HumanAct((Action){ A_DRAW, marks }); return; }
+    float ix = bx + 450, iw = bar.x + bar.width - 20 - ix;
+    bool coach = gameMode == MODE_TRAIN && hintsBefore && advKey == DecisionKey() && tips.draw;
+    if (coach) {
+        if (Button((Rectangle){ ix, by, 150, 32 }, "Coach's cards", true, (Color){ 40, 120, 80, 255 })) arr.marks = tips.amount;
+        if (k && Button((Rectangle){ ix + 160, by, 90, 32 }, "Clear", true, (Color){ 70, 78, 92, 255 })) arr.marks = 0;
+    } else if (k && Button((Rectangle){ ix, by, 90, 32 }, "Clear", true, (Color){ 70, 78, 92, 255 })) arr.marks = 0;
+    int left = drawsLeft(&game, game.human);
+    char t[220];
+    snprintf(t, sizeof t, "Click the cards you want to throw away (or press 1-%d), then Draw. You may change any number of cards. %s",
+             n < 5 ? n : 5, left > 1 ? TextFormat("%d draws left, this one included.", left) : "This is the last draw.");
+    ControlNote(t, ix, by + 40, iw);
+}
+
+// fixed limit: one size per round, so no slider. Stud's bring-in, and the open-pair choice on 4th street
+static void DrawFixedControls(Rectangle bar, const Legal *l) {
+    const Seat *h = &game.s[game.human];
+    float bx = bar.x + 20, by = bar.y + 16, bh = 72;
+    bool open = l->canRaise && !l->bringIn && l->maxTo > l->minTo;
+    Rectangle rf = { bx, by, 150, bh }, rc = { bx + 162, by, 200, bh }, rr = { bx + 374, by, 210, bh }, rb = { bx + 596, by, 210, bh };
+    int rec = CoachPick();
+    if (rec >= 0) {
+        int amt = UseBasic() ? tips.amount : adv.aggAmount;
+        PickGlow(rec == A_FOLD ? rf : rec == A_CHECK || rec == A_CALL ? rc : open && amt >= l->maxTo ? rb : rr);
+    }
+    bool canFold = !l->canCheck && !l->bringIn;          // the bring-in is forced
+    if (Button(rf, "Fold", canFold, (Color){ 150, 50, 50, 255 }) || (canFold && KeyHit(KEY_F))) { if (canFold) { HumanAct((Action){ A_FOLD, 0 }); return; } }
+    char lbl[64];
+    if (l->bringIn) snprintf(lbl, sizeof lbl, "Bring in %s", Money(l->toCall));
+    else if (l->canCheck) snprintf(lbl, sizeof lbl, "Check");
+    else snprintf(lbl, sizeof lbl, "Call %s%s", Money(l->toCall), l->toCall >= h->stack ? " (all-in)" : "");
+    if (Button(rc, lbl, true, (Color){ 46, 110, 190, 255 }) || KeyHit(KEY_C) || KeyHit(KEY_K)) {
+        HumanAct((Action){ l->canCheck && !l->bringIn ? A_CHECK : A_CALL, 0 });
+        return;
+    }
+    int to = open ? l->minTo : l->maxTo, cap = gameCapLeft(&game);
+    bool allin = to >= h->stack + h->bet;
+    if (l->bringIn) snprintf(lbl, sizeof lbl, "Complete to %s", Money(to));
+    else if (!l->canRaise && cap == 0) snprintf(lbl, sizeof lbl, "Capped");
+    else if (allin && l->canRaise) snprintf(lbl, sizeof lbl, "All-in %s", Money(to));
+    else snprintf(lbl, sizeof lbl, "%s %s%s", game.curBet == 0 ? "Bet" : "Raise to", Money(to), open ? " (small)" : "");
+    if (Button(rr, lbl, l->canRaise, (Color){ 190, 100, 40, 255 }) || (l->canRaise && (KeyHit(KEY_R) || KeyHit(KEY_ENTER)))) {
+        HumanAct((Action){ A_RAISE, to });
+        return;
+    }
+    if (open) {
+        snprintf(lbl, sizeof lbl, "Bet %s (big)", Money(l->maxTo));
+        if (Button(rb, lbl, true, (Color){ 190, 100, 40, 255 }) || KeyHit(KEY_B)) { HumanAct((Action){ A_RAISE, l->maxTo }); return; }
+    }
+    float ix = open ? bx + 822 : bx + 600, iw = bar.x + bar.width - 20 - ix;
+    char t[240];
+    if (l->bringIn)
+        snprintf(t, sizeof t, "You have the bring-in: you must start the betting. Post %s, or complete to a full bet of %s. Folding isn't allowed.", Money(l->toCall), Money(l->minTo));
+    else if (open)
+        snprintf(t, sizeof t, "An open pair shows on 4th street, so you may bet the small bet (%s) or the big bet (%s). B = big bet.", Money(l->minTo), Money(l->maxTo));
+    else {
+        snprintf(t, sizeof t, "Fixed limit: every bet and raise is %s on this %s.", Money(game.betUnit), IsDraw() ? "round" : "street");
+        size_t m = strlen(t);
+        if (cap < 0) snprintf(t + m, sizeof t - m, " Heads-up from the start of the round: no cap.");
+        else if (cap == 0) snprintf(t + m, sizeof t - m, " The betting is capped: you can only call or fold.");
+        else snprintf(t + m, sizeof t - m, " %d raise%s left before the cap (a bet and three raises).", cap, cap == 1 ? "" : "s");
+    }
+    Tip((Rectangle){ ix, by, iw, 72 }, l->bringIn ? "Bring-in" : open ? "Open pair" : "Fixed limit");
+    ControlNote(t, ix, by + 2, iw);
 }
 
 static void DrawControls(void) {
@@ -768,20 +1097,33 @@ static void DrawControls(void) {
         }
         int net = h->won - h->total;
         char m[96];
-        if (h->total == 0 && h->won == 0) snprintf(m, sizeof m, "You folded before the flop.");
+        if (h->total == 0 && h->won == 0) snprintf(m, sizeof m, varHasBoard(game.variant) ? "You folded before the flop." : "You folded without putting chips in.");
         else if (net > 0) snprintf(m, sizeof m, "You won %s this hand.", Money(net));
         else if (net < 0) snprintf(m, sizeof m, "You lost %s this hand.", Money(-net));
         else snprintf(m, sizeof m, "You broke even this hand.");
         Txt(fBold, m, bar.x + 30, bar.y + 24, 22, net > 0 ? C_GOLD : C_TEXT);
         const char *sub = gameMode == MODE_TRAIN ? "Review your decisions in the coach panel, then deal the next hand."
+                        : gameMode == MODE_LEARN ? "The Rules tab explains who won and why. Deal the next hand when you're ready."
                         : autoDeal ? "Next hand starts automatically..." : "";
         Txt(fReg, sub, bar.x + 30, bar.y + 60, 16, C_DIM);
         if (Button((Rectangle){ bar.x + bar.width - 230, bar.y + 26, 205, 52 }, "Next Hand", true, C_GREEN) || KeyHit(KEY_SPACE) || KeyHit(KEY_ENTER)) NextHand();
         return;
     }
+    if (paused) {
+        char m[96];
+        if (game.phase == PH_DRAW) snprintf(m, sizeof m, "Time to draw - paused");
+        else snprintf(m, sizeof m, "%s - paused", game.street == 0 ? "New hand" : streetName(&game, game.street));
+        Txt(fBold, m, bar.x + 30, bar.y + 24, 22, C_TEXT);
+        Txt(fReg, "Read what the rules coach says (right), then continue.  Space / Enter = continue.", bar.x + 30, bar.y + 60, 16, C_DIM);
+        if (Button((Rectangle){ bar.x + bar.width - 230, bar.y + 26, 205, 52 }, "Continue", true, C_GREEN) || KeyHit(KEY_SPACE) || KeyHit(KEY_ENTER)) {
+            paused = false;
+            stepTimer = BotDelay() * 0.5f;
+        }
+        return;
+    }
     if (game.toAct != game.human) {
         char m[96];
-        if (game.toAct >= 0) snprintf(m, sizeof m, "%s is thinking...", game.s[game.toAct].name);
+        if (game.toAct >= 0) snprintf(m, sizeof m, game.phase == PH_DRAW ? "%s is drawing..." : "%s is thinking...", game.s[game.toAct].name);
         else snprintf(m, sizeof m, "Dealing...");
         Txt(fBold, m, bar.x + 30, bar.y + 24, 22, C_TEXT);
         const char *sub = !h->inHand ? "You folded - watch how the hand plays out." : h->allin ? "You're all-in."
@@ -791,11 +1133,14 @@ static void DrawControls(void) {
     }
     Legal l;
     gameLegal(&game, &l);
+    if (l.draw) { DrawDrawControls(bar); return; }
+    if (gameIsFixed(&game)) { DrawFixedControls(bar, &l); return; }
     int key = DecisionKey();
     bool coachOn = gameMode == MODE_TRAIN && hintsBefore && advKey == key;
+    int coachAmt = !coachOn ? 0 : UseBasic() ? (tips.act == A_RAISE ? tips.amount : 0) : adv.aggAmount;
     if (raiseKey != key) {
         raiseKey = key;
-        raiseAmt = coachOn && adv.aggAmount > 0 ? Snap(adv.aggAmount, &l) : l.minTo;
+        raiseAmt = coachAmt > 0 ? Snap(coachAmt, &l) : l.minTo;
         if (gameMode != MODE_TRAIN || !hintsBefore) {
             int pot = gamePot(&game);
             raiseAmt = Snap(game.curBet == 0 ? pot * 2 / 3 : game.street == ST_PREFLOP && game.nRaises == 0 ? (int)(2.5f * game.bbAmt) : 3 * game.curBet, &l);
@@ -803,16 +1148,12 @@ static void DrawControls(void) {
     }
     if (raiseAmt < l.minTo) raiseAmt = l.minTo;
     if (raiseAmt > l.maxTo) raiseAmt = l.maxTo;
-    int rec = coachOn ? adv.act : -1;
+    int rec = CoachPick();
     float bx = bar.x + 20, by = bar.y + 16, bh = 72;
     Rectangle rf = { bx, by, 150, bh }, rc = { bx + 162, by, 200, bh }, rr = { bx + 374, by, 230, bh };
     char lbl[64];
     // highlight the coach's pick
-    Rectangle hl = rec == A_FOLD ? rf : (rec == A_CHECK || rec == A_CALL) ? rc : rr;
-    if (rec >= 0) {
-        float a = 0.5f + 0.5f * sinf(animT * 4);
-        DrawRectangleRoundedLinesEx((Rectangle){ hl.x - 5, hl.y - 5, hl.width + 10, hl.height + 10 }, 0.35f, 8, 3, Fade((Color){ 90, 230, 140, 255 }, 0.5f + 0.5f * a));
-    }
+    if (rec >= 0) PickGlow(rec == A_FOLD ? rf : (rec == A_CHECK || rec == A_CALL) ? rc : rr);
     if (!l.canCheck) {
         if (Button(rf, "Fold", true, (Color){ 150, 50, 50, 255 }) || KeyHit(KEY_F)) { HumanAct((Action){ A_FOLD, 0 }); return; }
     } else Button(rf, "Fold", false, (Color){ 150, 50, 50, 255 });
@@ -858,8 +1199,8 @@ static void DrawControls(void) {
     DrawRectangleRounded(sl, 1, 6, (Color){ 60, 66, 78, 255 });
     float f = l.maxTo > l.minTo ? (float)(raiseAmt - l.minTo) / (l.maxTo - l.minTo) : 1;
     DrawRectangleRounded((Rectangle){ sl.x, sl.y, sl.width * f, sl.height }, 1, 6, (Color){ 190, 100, 40, 255 });
-    if (coachOn && adv.aggAmount > 0 && l.maxTo > l.minTo) {
-        float rfx = (float)(Snap(adv.aggAmount, &l) - l.minTo) / (l.maxTo - l.minTo);
+    if (coachAmt > 0 && l.maxTo > l.minTo) {
+        float rfx = (float)(Snap(coachAmt, &l) - l.minTo) / (l.maxTo - l.minTo);
         DrawRectangle((int)(sl.x + sl.width * rfx) - 1, (int)sl.y - 7, 3, 22, (Color){ 90, 230, 140, 255 });
     }
     Vector2 knob = { sl.x + sl.width * f, sl.y + sl.height / 2 };
@@ -938,16 +1279,12 @@ static float DrawLines(const char *const *lines, int n, float x, float y, float 
 }
 
 // glossary terms the advice mentions, as chips: hover for the definition, click to open the glossary
-static float DrawTermChips(const Advice *a, float x, float y, float w) {
+static float DrawTermChips(const char *all, float x, float y, float w) {
     static int terms[24], nterms = 0;
     static unsigned sum = 0;
     unsigned h = 0;
-    for (const char *p = a->head; *p; p++) h = h * 31 + (unsigned char)*p;
-    for (int i = 0; i < a->nwhy; i++) for (const char *p = a->why[i]; *p; p++) h = h * 31 + (unsigned char)*p;
+    for (const char *p = all; *p; p++) h = h * 31 + (unsigned char)*p;
     if (h != sum) {
-        static char all[sizeof a->why + 600];
-        int len = snprintf(all, sizeof all, "%s. %s. %s. %s.", a->spot, a->hand, a->draws, a->head);
-        for (int i = 0; i < a->nwhy && len < (int)sizeof all - 2; i++) len += snprintf(all + len, sizeof all - len, " %s", a->why[i]);
         nterms = glossFind(all, terms, 24);
         sum = h;
     }
@@ -1037,7 +1374,10 @@ static void DrawCoachTab(float x, float y, float w) {
             const char *lines[NWHY];
             for (int i = 0; i < a->nwhy; i++) lines[i] = a->why[i];
             DrawLines(lines, a->nwhy, x, y, w, whyH, false);
-            DrawTermChips(a, x, y + whyH + 18, w);
+            static char all[sizeof a->why + 600];
+            int len = snprintf(all, sizeof all, "%s. %s. %s. %s.", a->spot, a->hand, a->draws, a->head);
+            for (int i = 0; i < a->nwhy && len < (int)sizeof all - 2; i++) len += snprintf(all + len, sizeof all - len, " %s", a->why[i]);
+            DrawTermChips(all, x, y + whyH + 18, w);
             whyH += 58;
         } else {
             if (whyH < 60) whyH = 60;
@@ -1089,6 +1429,189 @@ static void DrawCoachTab(float x, float y, float w) {
     } else Txt(fReg, "No leaks found yet.", x, by + 50, 14, C_DIM);
 }
 
+// the rules coach's "what you may do now" and showdown lines, recomputed only when the spot changes
+static void RefreshRuleText(void) {
+    if (game.toAct == game.human && !game.handOver && !paused) {
+        int key = DecisionKey();
+        if (ruleTurnKey != key) { nruleTurn = rulesYourTurn(&game, game.human, ruleTurn, 12); ruleTurnKey = key; whyScroll = 0; }
+    } else { nruleTurn = 0; ruleTurnKey = -1; }
+    if (game.handOver) {
+        if (ruleShowKey != game.handNo) { nruleShow = rulesShowdown(&game, ruleShow, 12); ruleShowKey = game.handNo; whyScroll = 0; }
+    } else { nruleShow = 0; ruleShowKey = -1; }
+}
+
+static const char *ReviewStreet(int st) {
+    if (st >= 100) return varInfo(game.variant)->draws == 1 ? "Draw" : TextFormat("Draw %d", st - 99);
+    return streetName(&game, st);
+}
+
+// the coach for every game but Hold'em / Omaha: tips (equity, price, what to draw) without grades
+static void DrawTipsTab(float x, float y, float w) {
+    bool myTurn = game.toAct == game.human && !game.handOver && advKey == DecisionKey();
+    const Tips *t = myTurn ? &tips : lastTipsValid ? &lastTips : NULL;
+    float y0 = y;
+    if (!t) {
+        Section("COACH", x, y);
+        Wrap(fReg, game.handOver ? "No decisions for you this hand." :
+             "In this game the coach gives tips, not grades: what your hand is worth here, your share of the pot against the hands "
+             "the others could hold, the price of calling, and which cards to draw. Wait for your turn.", x, y + 26, w, 16, 22, C_TEXT, true);
+    } else {
+        Section(myTurn ? "YOUR DECISION" : "LAST DECISION", x, y);
+        y += 22;
+        y += Wrap(fBold, t->hand[0] ? t->hand : "-", x, y, w, 17, 22, WHITE, true) + 4;
+        char b1[32], b2[32], b3[32];
+        float sw = (w - 12) / 3;
+        snprintf(b1, sizeof b1, "%.0f%%", t->equity * 100);
+        if (t->need > 0) snprintf(b2, sizeof b2, "%.0f%%", t->need * 100); else snprintf(b2, sizeof b2, "free");
+        snprintf(b3, sizeof b3, "%d", t->nopp);
+        Color ec = t->need > 0 ? (t->equity >= t->need ? Q_COL[0] : Q_COL[4]) : WHITE;
+        Stat("Your share", b1, x, y, sw, ec, "Equity");
+        Stat("Equity needed", b2, x + sw + 6, y, sw, WHITE, "Pot odds");
+        Stat("Opponents", b3, x + 2 * (sw + 6), y, sw, WHITE, "Multiway");
+        y += 60;
+        bool reveal = !myTurn || hintsBefore;
+        Rectangle rb = { x, y, w, 64 };
+        DrawRectangleRounded(rb, 0.2f, 8, reveal ? (Color){ 30, 70, 52, 255 } : C_PANEL2);
+        if (reveal) {
+            Tip(rb, "Coach tips");
+            Txt(fReg, "Coach suggests  (a tip, not a grade)", x + 12, y + 8, 13, (Color){ 160, 220, 180, 255 });
+            float sz = 22;
+            while (sz > 14 && TxtW(fBold, t->head, sz) > w - 24) sz -= 1;
+            Txt(fBold, t->head, x + 12, y + 27 + (22 - sz) / 2, sz, WHITE);
+        } else {
+            Tip(rb, "Hints / Quiz mode");
+            Txt(fBold, "Quiz mode - make your play", x + 12, y + 12, 18, WHITE);
+            Txt(fReg, "Think it through, then act. The tip shows right after.", x + 12, y + 38, 14, C_DIM);
+        }
+        y += 72;
+        if (!myTurn) {
+            char m[200];
+            Color c = lastTipMatch ? Q_COL[0] : Q_COL[2];
+            if (lastTipMatch) snprintf(m, sizeof m, "You: %s  -  same as the coach", lastDid);
+            else snprintf(m, sizeof m, "You: %s  -  coach: %s", lastDid, t->head);
+            float sz = 15;
+            while (sz > 11 && TxtW(fBold, m, sz) > w - 20) sz -= 1;
+            DrawRectangleRounded((Rectangle){ x, y, w, 30 }, 0.4f, 6, Fade(c, 0.25f));
+            DrawRectangleRoundedLinesEx((Rectangle){ x, y, w, 30 }, 0.4f, 6, 1.5f, c);
+            Txt(fBold, m, x + 10, y + (30 - sz) / 2, sz, WHITE);
+            y += 36;
+        }
+        float listH = y0 + 600 - (game.handOver && nreview ? 150 : 0) - y;
+        if (reveal) {
+            listH -= 58;
+            if (listH < 60) listH = 60;
+            const char *lines[NTIPS];
+            for (int i = 0; i < t->ntips; i++) lines[i] = t->tips[i];
+            DrawLines(lines, t->ntips, x, y, w, listH, false);
+            static char all[NTIPS * 270 + 300];
+            int len = snprintf(all, sizeof all, "%s. %s.", t->head, t->hand);
+            for (int i = 0; i < t->ntips && len < (int)sizeof all - 2; i++) len += snprintf(all + len, sizeof all - len, " %s", t->tips[i]);
+            DrawTermChips(all, x, y + listH + 18, w);
+        } else {
+            if (listH < 60) listH = 60;
+            Section("THINK IT THROUGH", x, y);
+            const char *lines[12];
+            for (int i = 0; i < nruleTurn; i++) lines[i] = ruleTurn[i];
+            DrawLines(lines, nruleTurn, x, y + 22, w, listH - 22, true);
+        }
+    }
+    // this hand + session
+    float by = y0 + 620;
+    if (game.handOver && nreview > 0) {
+        float ry = by - 150;
+        Section("THIS HAND", x, ry);
+        ry += 20;
+        for (int i = nreview > 6 ? nreview - 6 : 0; i < nreview; i++) {
+            const Review *r = &review[i];
+            bool same = r->q == -1;
+            DrawCircleV((Vector2){ x + 6, ry + 9 }, 5, same ? Q_COL[0] : Q_COL[2]);
+            char tt[200];
+            snprintf(tt, sizeof tt, "%s: %s", ReviewStreet(r->street), r->did);
+            Txt(fBold, tt, x + 18, ry, 14, WHITE);
+            if (!same) TxtR(fReg, TextFormat("coach: %s", r->best), x + w, ry, 13, C_DIM);
+            else TxtR(fReg, "same as the coach", x + w, ry, 13, Q_COL[0]);
+            ry += 21;
+        }
+    }
+    DrawLine((int)x, (int)by, (int)(x + w), (int)by, Fade(WHITE, 0.12f));
+    Section("SESSION", x, by + 10);
+    char s[160];
+    snprintf(s, sizeof s, "%d decisions  -  %d the same as the coach's tip (%d%%)", tipDecisions, tipMatches, tipDecisions ? 100 * tipMatches / tipDecisions : 0);
+    Txt(fReg, s, x, by + 30, 14, C_TEXT);
+    if (decisions > 0) {                 // mixed games: the graded Hold'em / Omaha hands so far
+        int good = qCount[0] + qCount[1];
+        snprintf(s, sizeof s, "Graded (Hold'em / Omaha): %d decisions, %d%% good", decisions, 100 * good / decisions);
+        Txt(fReg, s, x, by + 50, 14, C_DIM);
+    } else Txt(fReg, "Grades are for Hold'em and Omaha; here the coach gives tips.", x, by + 50, 14, C_DIM);
+}
+
+// the rules coach: what happened this hand and why, what you may do now, and who won and why
+static void DrawRulesTab(float x, float y, float w, float h) {
+    char t[120];
+    snprintf(t, sizeof t, "RULES  -  %s", varInfo(game.variant)->name);
+    Section(t, x, y + 4);
+    if (Button((Rectangle){ x + w - 120, y - 2, 120, 26 }, "Full rules (H)", true, (Color){ 60, 66, 80, 255 })) OpenHelp(game.variant);
+    y += 32;
+    h -= 32;
+    const char *head = NULL;
+    char (*lines)[RULE_LEN] = NULL;
+    int nl = 0;
+    if (nruleTurn) { head = "YOUR TURN: WHAT YOU MAY DO"; lines = ruleTurn; nl = nruleTurn; }
+    else if (nruleShow) { head = "WHO WON AND WHY"; lines = ruleShow; nl = nruleShow; }
+    float boxH = 0;
+    if (nl) {
+        for (int i = 0; i < nl; i++) boxH += Wrap(fReg, lines[i], 0, 0, w - 22, 15, 20, C_TEXT, false) + 8;
+        boxH += 44;
+        if (boxH > h * 0.55f) boxH = h * 0.55f;
+    }
+    float termsH = 58, listH = h - boxH - (nl ? 12 : 0) - termsH;
+    // the narration, newest at the bottom
+    Rectangle clip = { x - 6, y, w + 12, listH };
+    float total = 0;
+    for (int i = 0; i < nnarr; i++) total += Wrap(fReg, narr[i], 0, 0, w - 18, 15, 20, C_TEXT, false) + 14;
+    float maxS = total > listH ? total - listH : 0;
+    if (gLayer == gActive && CheckCollisionPointRec(mouse, clip)) {
+        float wh = GetMouseWheelMove();
+        if (wh != 0) { narrScroll -= wh * 40; narrFollow = narrScroll >= maxS - 1; }
+    }
+    if (narrFollow) narrScroll = maxS;
+    if (narrScroll < 0) narrScroll = 0;
+    if (narrScroll > maxS) narrScroll = maxS;
+    ClipBegin(clip);
+    float yy = y - narrScroll;
+    for (int i = 0; i < nnarr; i++) {
+        bool newest = i == nnarr - 1;
+        float eh = Wrap(fReg, narr[i], 0, 0, w - 18, 15, 20, C_TEXT, false);
+        if (newest) {
+            DrawRectangleRounded((Rectangle){ x - 6, yy - 5, w + 12, eh + 10 }, 0.1f, 6, (Color){ 46, 62, 84, 255 });
+            DrawRectangle((int)x - 6, (int)yy - 5, 3, (int)eh + 10, C_GOLD);
+        }
+        DrawCircleV((Vector2){ x + 4, yy + 9 }, 2.5f, newest ? C_GOLD : (Color){ 140, 170, 210, 255 });
+        Wrap(fReg, narr[i], x + 14, yy, w - 18, 15, 20, newest ? WHITE : (Color){ 186, 194, 204, 255 }, true);
+        yy += eh + 14;
+    }
+    EndScissorMode();
+    if (!nnarr) Wrap(fReg, "The rules coach explains everything that happens in the hand as it happens: the forced bets, the deal, "
+                           "who acts first and why, what each bet or draw means under this game's rules, and who wins at the end.",
+                     x, y, w, 15, 21, C_DIM, true);
+    if (maxS > 0 && !narrFollow) TxtR(fReg, "scroll down for the newest", x + w, y + listH + 2, 12, C_GOLD);
+    y += listH;
+    // jargon in what the coach just said
+    static char all[RULE_LEN * 13];
+    int len = snprintf(all, sizeof all, "%s", nnarr ? narr[nnarr - 1] : "");
+    for (int i = 0; i < nl && len < (int)sizeof all - 2; i++) len += snprintf(all + len, sizeof all - len, " %s", lines[i]);
+    DrawTermChips(all, x, y + 14, w);
+    y += termsH;
+    if (nl) {
+        y += 12;
+        DrawRectangleRounded((Rectangle){ x - 6, y, w + 12, boxH }, 0.06f, 8, nruleTurn ? (Color){ 28, 54, 78, 255 } : (Color){ 64, 52, 24, 255 });
+        Section(head, x + 4, y + 10);
+        const char *lp[12];
+        for (int i = 0; i < nl; i++) lp[i] = lines[i];
+        DrawLines(lp, nl, x + 4, y + 34, w - 8, boxH - 44, false);
+    }
+}
+
 static void DrawLogTab(float x, float y, float w, float h) {
     Rectangle clip = { x - 4, y, w + 8, h };
     float total = 0;
@@ -1102,12 +1625,17 @@ static void DrawLogTab(float x, float y, float w, float h) {
     if (total < h) yy = y;
     for (int i = 0; i < game.nlog; i++) {
         const char *s = game.log[i];
-        bool head = strncmp(s, "---", 3) == 0;
-        bool street = strncmp(s, "Flop", 4) == 0 || strncmp(s, "Turn", 4) == 0 || strncmp(s, "River", 5) == 0;
+        bool head = strncmp(s, "---", 3) == 0 || strncmp(s, "===", 3) == 0;
+        bool street = strstr(s, "(pot ") != NULL;              // a new street, board card or draw
         Color c = head ? C_GOLD : street ? (Color){ 140, 190, 240, 255 } : strncmp(s, "You", 3) == 0 ? (Color){ 150, 230, 170, 255 } : C_TEXT;
         yy += Wrap(head || street ? fBold : fReg, s, x, yy, w, 14, 18, c, true) + 2;
     }
     EndScissorMode();
+}
+
+static bool TabButton(Rectangle r, const char *label, int tab) {
+    if (Button(r, label, true, panelTab == tab ? C_BLUE : (Color){ 60, 66, 80, 255 })) { panelTab = tab; return true; }
+    return false;
 }
 
 static void DrawPanel(void) {
@@ -1116,7 +1644,8 @@ static void DrawPanel(void) {
     DrawRectangleRoundedLinesEx(r, 0.03f, 8, 1.5f, Fade(WHITE, 0.1f));
     float x = PX + 16, w = PW - 32;
     if (!gameStarted) return;
-    bool train = gameMode == MODE_TRAIN;
+    RefreshRuleText();
+    bool train = gameMode == MODE_TRAIN, learn = gameMode == MODE_LEARN;
     // header: stack & session result
     const Seat *h = &game.s[game.human];
     int net = HeroChips() - Invested();
@@ -1128,20 +1657,28 @@ static void DrawPanel(void) {
     Txt(fReg, t, x, r.y + 46, 13, C_DIM);
     float ty = r.y + 70;
     if (train) {
-        if (Button((Rectangle){ x, ty, w / 2 - 4, 32 }, "Coach", true, panelTab == 0 ? C_BLUE : (Color){ 60, 66, 80, 255 })) panelTab = 0;
-        if (Button((Rectangle){ x + w / 2 + 4, ty, w / 2 - 4, 32 }, "Hand log", true, panelTab == 1 ? C_BLUE : (Color){ 60, 66, 80, 255 })) panelTab = 1;
+        float bw = (w - 12) / 3;
+        TabButton((Rectangle){ x, ty, bw, 32 }, "Coach", PT_COACH);
+        TabButton((Rectangle){ x + bw + 6, ty, bw, 32 }, "Rules", PT_RULES);
+        TabButton((Rectangle){ x + 2 * (bw + 6), ty, bw, 32 }, "Hand log", PT_LOG);
+        ty += 44;
+    } else if (learn) {
+        if (panelTab == PT_COACH) panelTab = PT_RULES;
+        TabButton((Rectangle){ x, ty, w / 2 - 4, 32 }, "Rules coach", PT_RULES);
+        TabButton((Rectangle){ x + w / 2 + 4, ty, w / 2 - 4, 32 }, "Hand log", PT_LOG);
         ty += 44;
     } else {
         Section("HAND LOG", x, ty + 4);
         ty += 28;
-        panelTab = 1;
+        panelTab = PT_LOG;
     }
-    if (train && panelTab == 0) DrawCoachTab(x, ty, w);
-    else DrawLogTab(x, ty, w, r.y + r.height - ty - (train ? 70 : 80));
-    // footer buttons
     float fy = r.y + r.height - 50;
+    if (panelTab == PT_COACH) { if (UseBasic()) DrawTipsTab(x, ty, w); else DrawCoachTab(x, ty, w); }
+    else if (panelTab == PT_RULES) DrawRulesTab(x, ty, w, fy - 14 - ty);
+    else DrawLogTab(x, ty, w, r.y + r.height - ty - (train || learn ? 70 : 80));
+    // footer buttons
+    float bw = (w - 12) / 3;
     if (train) {
-        float bw = (w - 12) / 3;
         if (Button((Rectangle){ x, fy, bw, 36 }, "Charts", game.variant == V_HOLDEM, (Color){ 80, 70, 140, 255 }) || (game.variant == V_HOLDEM && KeyHit(KEY_G))) {
             showChart = true;
             int pos = posIndex(&game, game.human);
@@ -1150,10 +1687,19 @@ static void DrawPanel(void) {
         if (Button((Rectangle){ x + bw + 6, fy, bw, 36 }, "Lessons", true, (Color){ 80, 70, 140, 255 }) || KeyHit(KEY_L)) { showLessons = true; helpScroll = 0; }
         if (Button((Rectangle){ x + 2 * (bw + 6), fy, bw, 36 }, hintsBefore ? "Hints: on" : "Quiz mode", true, hintsBefore ? (Color){ 40, 120, 80, 255 } : (Color){ 150, 100, 40, 255 }))
             hintsBefore = !hintsBefore;
+    } else if (learn) {
+        if (Button((Rectangle){ x, fy, bw, 36 }, "Rule sheet", true, (Color){ 80, 70, 140, 255 })) OpenHelp(game.variant);
+        if (Button((Rectangle){ x + bw + 6, fy, bw, 36 }, "Lessons", true, (Color){ 80, 70, 140, 255 }) || KeyHit(KEY_L)) { showLessons = true; helpScroll = 0; }
+        Rectangle pb = { x + 2 * (bw + 6), fy, bw, 36 };
+        if (Button(pb, pauseStreets ? "Pause: on" : "Pause: off", true, pauseStreets ? (Color){ 40, 120, 80, 255 } : (Color){ 100, 110, 130, 255 })) {
+            pauseStreets = !pauseStreets;
+            if (!pauseStreets) paused = false;
+        }
+        Tip(pb, "Learn the rules mode");
     } else {
         snprintf(t, sizeof t, "Biggest pot won: %s", Money(biggestPot));
         Txt(fReg, t, x, fy - 6, 14, C_DIM);
-        Txt(fReg, "Want feedback on your play? Start a Training game from the menu.", x, fy + 14, 13, C_DIM);
+        Txt(fReg, "Want help? Start a Learn or Training game from the menu.", x, fy + 14, 13, C_DIM);
     }
 }
 
@@ -1170,28 +1716,76 @@ static bool Choice(Rectangle r, const char *label, bool on) {
     return Button(r, label, true, on ? (Color){ 46, 110, 190, 255 } : (Color){ 150, 150, 160, 255 });
 }
 
+static void PickGame(int tab, int k) {
+    setTab = tab;
+    tabPick[tab] = k;
+    if (tab == TAB_MIXED) {
+        const MixGame *m;
+        setMix = TAB_GAMES[tab][k];
+        if (mixGames(setMix, &m) > 0) { setVariant = m[0].variant; setLimit = m[0].limit; }
+    } else {
+        setMix = MIX_NONE;
+        setVariant = TAB_GAMES[tab][k];
+        setLimit = varInfo(setVariant)->defLimit;
+    }
+}
+
+static int MenuPage(void) { return setMix ? MixPage(setMix) : setVariant; }    // the rules page for the game picked in the menu
+
 static void DrawMenu(void) {
     Rectangle r = { VW / 2.0f - 400, 30, 800, 840 };
     Panel(r);
-    float cx = r.x + r.width / 2, lx = r.x + 50, cx0 = r.x + 230;
-    TxtC(fBold, "Poker Trainer", cx, r.y + 26, 44, C_INK);
-    TxtC(fReg, "Texas Hold'em & Omaha  -  play the bots or train with a coach", cx, r.y + 80, 17, C_MUTED);
-    int deco[5] = { CARD(12, 3), CARD(11, 2), CARD(10, 1), CARD(9, 0), CARD(8, 3) };
-    for (int i = 0; i < 5; i++) DrawCard(deco[i], (Rectangle){ cx - 2.5f * 66 + i * 66 + 4, r.y + 112, 58, 82 }, false, false);
-    float y = r.y + 210, rowH = 47;
+    float cx = r.x + r.width / 2, lx = r.x + 50, cx0 = r.x + 230, rw = r.x + r.width - 40 - cx0;
+    TxtC(fBold, "Poker Trainer", cx, r.y + 20, 42, C_INK);
+    TxtC(fReg, "12 poker games and 2 mixed rotations  -  play the bots, learn the rules, or train with a coach", cx, r.y + 72, 16, C_MUTED);
+    float y = r.y + 108, rowH = 47;
+    char t[160];
 
-    Txt(fBold, "Game", lx, y + 9, 19, C_INK);
-    if (Choice((Rectangle){ cx0, y, 200, 40 }, "Texas Hold'em", setVariant == V_HOLDEM)) { setVariant = V_HOLDEM; setLimit = BL_NOLIMIT; }
-    if (Choice((Rectangle){ cx0 + 210, y, 200, 40 }, "Omaha", setVariant == V_OMAHA)) { setVariant = V_OMAHA; setLimit = BL_POTLIMIT; }
-    y += rowH;
+    // game: a tab per family (Razz gets its own), then the games in it
+    Txt(fBold, "Game", lx, y + 8, 19, C_INK);
+    float tw = (rw - 4 * 7) / 5;
+    for (int k = 0; k < NTABS; k++)
+        if (Button((Rectangle){ cx0 + k * (tw + 7), y, tw, 36 }, TAB_NAME[k], true, setTab == k ? (Color){ 60, 70, 90, 255 } : (Color){ 170, 168, 160, 255 }))
+            PickGame(k, tabPick[k]);
+    DrawRectangle((int)cx0, (int)y + 40, (int)rw, 2, (Color){ 60, 70, 90, 255 });
+    y += 48;
+    int ng = TAB_N[setTab];
+    float gw = (rw - (ng - 1) * 7) / ng;
+    if (gw > 210) gw = 210;
+    for (int k = 0; k < ng; k++) {
+        int id = TAB_GAMES[setTab][k];
+        const char *nm = setTab == TAB_MIXED ? mixName(id) : varInfo(id)->shortName;
+        if (Choice((Rectangle){ cx0 + k * (gw + 7), y, gw, 38 }, nm, tabPick[setTab] == k)) PickGame(setTab, k);
+    }
+    y += 44;
+    Wrap(fReg, setMix ? mixBlurb(setMix) : varInfo(setVariant)->blurb, cx0, y, rw, 15, 19, C_MUTED, true);
+    y += 42;
+    // betting: only the structures this game is played with
     Txt(fBold, "Betting", lx, y + 9, 19, C_INK);
-    if (Choice((Rectangle){ cx0, y, 200, 40 }, "No-Limit", setLimit == BL_NOLIMIT)) setLimit = BL_NOLIMIT;
-    if (Choice((Rectangle){ cx0 + 210, y, 200, 40 }, "Pot-Limit", setLimit == BL_POTLIMIT)) setLimit = BL_POTLIMIT;
+    if (setMix) Wrap(fReg, "Each game in the rotation has its own structure (mostly fixed limit). The table shows the current one.", cx0, y + 2, rw, 15, 19, C_INK, true);
+    else {
+        int lim = varInfo(setVariant)->limits, k = 0;
+        for (int b = 0; b < BL_COUNT; b++) {
+            if (!(lim >> b & 1)) continue;
+            if (Choice((Rectangle){ cx0 + k * 180, y, 172, 40 }, limitName(b), setLimit == b)) setLimit = b;
+            k++;
+        }
+        if (k == 1) TxtR(fReg, "the only structure it's played with", r.x + r.width - 40, y + 12, 14, C_MUTED);
+    }
     y += rowH;
     Txt(fBold, "Mode", lx, y + 9, 19, C_INK);
-    if (Choice((Rectangle){ cx0, y, 200, 40 }, "Play", setMode == MODE_PLAY)) setMode = MODE_PLAY;
-    if (Choice((Rectangle){ cx0 + 210, y, 200, 40 }, "Training (coach)", setMode == MODE_TRAIN)) setMode = MODE_TRAIN;
-    y += rowH;
+    if (Choice((Rectangle){ cx0, y, 172, 40 }, "Play", setMode == MODE_PLAY)) setMode = MODE_PLAY;
+    if (Choice((Rectangle){ cx0 + 180, y, 172, 40 }, "Learn the rules", setMode == MODE_LEARN)) setMode = MODE_LEARN;
+    if (Choice((Rectangle){ cx0 + 360, y, 172, 40 }, "Training (coach)", setMode == MODE_TRAIN)) setMode = MODE_TRAIN;
+    y += 44;
+    bool classic = !setMix && aiClassic(setVariant);
+    const char *md = setMode == MODE_PLAY ? "Just play against the bots. Press H any time for the rules."
+                   : setMode == MODE_LEARN ? "A rules coach explains every step: forced bets, the deal, who acts, what you may do, who won and why."
+                   : classic ? "A graded strategy coach (Best ... Blunder) for every decision, plus the rules coach."
+                   : setMix ? "Graded coach in Hold'em and Omaha, strategy tips in the other games, plus the rules coach."
+                             : "Strategy tips for every decision (your share of the pot, the price, what to draw), plus the rules coach.";
+    Wrap(fReg, md, cx0, y, rw, 14, 18, C_MUTED, true);
+    y += 34;
     Txt(fBold, "Opponents", lx, y + 9, 19, C_INK);
     for (int k = 1; k <= 5; k++)
         if (Choice((Rectangle){ cx0 + (k - 1) * 82, y, 74, 40 }, TextFormat("%d", k), setOpp == k)) setOpp = k;
@@ -1208,19 +1802,31 @@ static void DrawMenu(void) {
         if (Button((Rectangle){ cx0 + 200 + (l - 1) * 92, y, 84, 28 }, levelName(l), true, LV_COL[l]))
             for (int k = 1; k < MAXP; k++) setLv[k] = l;
     y += 40;
-    Txt(fBold, "Blinds", lx, y + 9, 19, C_INK);
+    // stakes, as the engine will set them for this game
+    static Game tg;
+    GameConfig tc = { .variant = setVariant, .limit = setLimit, .mix = setMix, .n = 2, .sb = BLINDS[blindIdx][0], .bb = BLINDS[blindIdx][1], .buyin = 100, .human = 0 };
+    gameSetup(&tg, &tc);
+    bool stud = varInfo(setVariant)->family == FAM_STUD && !setMix, fixed = setLimit == BL_FIXED && !setMix;
+    Txt(fBold, stud || fixed ? "Limits" : "Blinds", lx, y + 9, 19, C_INK);
     if (Button((Rectangle){ cx0, y, 44, 40 }, "<", blindIdx > 0, (Color){ 100, 110, 130, 255 })) blindIdx--;
-    char t[96];
-    snprintf(t, sizeof t, "%s / %s", Money(BLINDS[blindIdx][0]), Money(BLINDS[blindIdx][1]));
+    if (stud || fixed) snprintf(t, sizeof t, "%s / %s", Money(tg.smallBet), Money(tg.bigBet));
+    else snprintf(t, sizeof t, "%s / %s", Money(BLINDS[blindIdx][0]), Money(BLINDS[blindIdx][1]));
     TxtC(fBold, t, cx0 + 140, y + 9, 21, C_INK);
     if (Button((Rectangle){ cx0 + 236, y, 44, 40 }, ">", blindIdx < NBLINDS - 1, (Color){ 100, 110, 130, 255 })) blindIdx++;
+    if (stud) snprintf(t, sizeof t, "ante %s, bring-in %s", Money(tg.ante), Money(tg.bringIn));
+    else if (fixed) snprintf(t, sizeof t, "small / big bet; blinds %s / %s", Money(BLINDS[blindIdx][0]), Money(BLINDS[blindIdx][1]));
+    else if (setMix) snprintf(t, sizeof t, "limit games bet %s / %s", Money(tg.smallBet), Money(tg.bigBet));
+    else t[0] = 0;
+    TxtR(fReg, t, r.x + r.width - 40, y + 12, 14, C_MUTED);
     y += rowH;
     Txt(fBold, "Buy-in", lx, y + 9, 19, C_INK);
     if (Button((Rectangle){ cx0, y, 44, 40 }, "<", buyIdx > 0, (Color){ 100, 110, 130, 255 })) buyIdx--;
     snprintf(t, sizeof t, "%s  (%d BB)", Money(BUYINS[buyIdx] * BLINDS[blindIdx][1]), BUYINS[buyIdx]);
     TxtC(fBold, t, cx0 + 140, y + 9, 21, C_INK);
     if (Button((Rectangle){ cx0 + 236, y, 44, 40 }, ">", buyIdx < NBUYINS - 1, (Color){ 100, 110, 130, 255 })) buyIdx++;
-    TxtR(fReg, BUYINS[buyIdx] < 40 ? "short stack: push/fold poker" : BUYINS[buyIdx] >= 100 ? "deep: the charts assume ~100 BB" : "medium stack", r.x + r.width - 40, y + 12, 14, C_MUTED);
+    const char *bn = setLimit == BL_FIXED || setMix ? (BUYINS[buyIdx] < 40 ? "short: you'll often be all-in" : "")
+                   : BUYINS[buyIdx] < 40 ? "short stack: push/fold poker" : BUYINS[buyIdx] >= 100 && classic ? "deep: the charts assume ~100 BB" : "medium stack";
+    TxtR(fReg, bn, r.x + r.width - 40, y + 12, 14, C_MUTED);
     y += rowH;
     Txt(fBold, "Speed", lx, y + 9, 19, C_INK);
     static const char *sp[3] = { "Slow", "Normal", "Fast" };
@@ -1230,15 +1836,20 @@ static void DrawMenu(void) {
     Txt(fBold, "Options", lx, y + 9, 19, C_INK);
     if (Choice((Rectangle){ cx0, y, 200, 40 }, fourColor ? "Four-color deck: on" : "Four-color deck: off", fourColor)) fourColor = !fourColor;
     if (Choice((Rectangle){ cx0 + 210, y, 200, 40 }, autoDeal ? "Auto-deal: on" : "Auto-deal: off", autoDeal)) autoDeal = !autoDeal;
-    y += 54;
-    TxtC(fReg, "Easy: loose and passive, calls far too much.   Medium: tight, but ignores position and ranges.", cx, y, 14, C_MUTED);
-    TxtC(fReg, "Hard: plays the coach's strategy, mixes in bluffs and adapts to how you play.", cx, y + 19, 14, C_MUTED);
-    y += 48;
+    y += 52;
+    if (classic) {
+        TxtC(fReg, "Easy: loose and passive, calls far too much.   Medium: tight, but ignores position and ranges.", cx, y, 14, C_MUTED);
+        TxtC(fReg, "Hard: plays the coach's strategy, mixes in bluffs and adapts to how you play.", cx, y + 19, 14, C_MUTED);
+    } else {
+        TxtC(fReg, "Easy: loose and passive, calls far too much.   Medium: plays its share of the pot against random hands.", cx, y, 14, C_MUTED);
+        TxtC(fReg, "Hard: plays the coach's tips and reads what the others' bets and draws say about their hands.", cx, y + 19, 14, C_MUTED);
+    }
+    y += 46;
     if (Button((Rectangle){ cx - 360, y, 230, 52 }, gameStarted ? "New Game" : "Start Game", true, C_GREEN) || (KeyHit(KEY_ENTER) && !gameStarted)) StartNewGame();
     if (gameStarted) {
         if (Button((Rectangle){ cx - 115, y, 230, 52 }, "Resume", true, C_BLUE)) showMenu = false;
         TxtC(fReg, "Settings apply when you start a new game.", cx, y + 62, 14, C_MUTED);
-    } else if (Button((Rectangle){ cx - 115, y, 230, 52 }, "How to play", true, C_BLUE)) { showHelp = true; helpScroll = 0; }
+    } else if (Button((Rectangle){ cx - 115, y, 230, 52 }, "Rules & help", true, C_BLUE)) OpenHelp(MenuPage());
     if (Button((Rectangle){ cx + 130, y, 230, 52 }, "Glossary", true, (Color){ 80, 70, 140, 255 })) OpenGlossary(-1);
 }
 
@@ -1258,35 +1869,37 @@ static float DrawPages(Rectangle r, const char *title, const char *body, float *
 }
 
 static const char *HELP_TEXT =
-    "TEXAS HOLD'EM\n"
-    "Everyone gets 2 private cards. Five shared cards are dealt face up in the middle: 3 on the flop, 1 on the turn, 1 on the river. "
-    "There is a betting round before the flop and after each new card. Your hand is the best 5 cards out of your 2 and the 5 on the board (you may use 0, 1 or 2 of your own).\n\n"
-    "OMAHA\n"
-    "Same structure, but you get 4 private cards and must use EXACTLY 2 of them with EXACTLY 3 from the board. "
-    "A board with four hearts does not give you a flush unless you hold two hearts yourself. Omaha is normally played Pot-Limit: the biggest raise allowed is the size of the pot.\n\n"
-    "BLINDS AND BETTING\n"
-    "The two players left of the dealer button post the small and big blind. Preflop, the player left of the big blind acts first; after the flop the first player left of the button does. "
-    "On your turn you can fold, check (if nobody has bet), call, or bet / raise. A raise must be at least as big as the previous bet or raise. "
-    "If you can't cover a bet you can still call all-in; side pots are made automatically.\n\n"
-    "HAND RANKINGS (best to worst)\n"
-    "Straight flush - Four of a kind - Full house - Flush - Straight - Three of a kind - Two pair - One pair - High card. "
-    "An ace can be high (T-J-Q-K-A) or low (A-2-3-4-5) in a straight. Equal hands split the pot.\n\n"
-    "CONTROLS\n"
-    "F = fold,  C or K = check / call,  R or Enter = bet / raise.  Up / Down arrows or the mouse wheel change the bet size, or drag the slider and use the size presets. "
-    "Space or Enter deals the next hand.  Esc opens the menu,  H this help,  T the glossary,  L the lessons,  M mutes the sound.  In training mode G opens the preflop charts.\n"
-    "Rearrange your own cards any time: drag a card to a new spot, or click one card and then another to swap them. "
-    "The Sort button orders them by rank, then by suit (handy in Omaha), and your choice is kept for the next hands.\n\n"
-    "TRAINING MODE\n"
-    "A coach panel analyses each of your decisions: your position, hand strength, pot odds, your equity against what the opponents probably hold, and what a solid player does. "
-    "With hints on, it shows the recommendation before you act and highlights the button. In quiz mode it stays hidden and grades your play afterwards (Best / Good / Inaccuracy / Mistake / Blunder). "
-    "Your session score and biggest leaks are tracked at the bottom. After each hand all the bots' cards are shown so you can see what they had.\n\n"
+    "THE GAMES\n"
+    "Pick a game from the menu tabs. Board games (Hold'em, Omaha, Omaha Hi-Lo, 5-Card Omaha, Short Deck) share cards in the middle. "
+    "Stud games (Seven-Card Stud, Stud Hi-Lo) and Razz deal each player their own cards, some face up. Draw games (Five-Card Draw, 2-7 Triple Draw, 2-7 Single Draw, Badugi) "
+    "let you swap cards. Mixed games (HORSE, 8-Game) rotate through several games, one orbit each. The list on the left has the full rules of every game.\n\n"
+    "THE THREE MODES\n"
+    "Play: just you and the bots. Learn the rules: the rules coach (the Rules tab in the side panel) explains every step of the hand as it happens - the forced bets, the deal, "
+    "who acts first and why, what each bet or draw means, what you may do on your turn, and who won and why. The game pauses whenever new cards come; press Continue (or Space) to go on, "
+    "or turn Pause off. The rule sheet opens before your first hand of each game. Training: a strategy coach for every decision, plus the Rules tab.\n\n"
+    "THE COACHES\n"
+    "In Hold'em and Omaha the strategy coach grades your play (Best / Good / Inaccuracy / Mistake / Blunder) and tracks your leaks. In the other games it gives tips instead of grades: "
+    "your share of the pot against the hands the others could hold, the price of calling, and which cards to draw. "
+    "With hints on, the coach's pick glows before you act; in quiz mode it stays hidden until you've acted. After each hand in Training, all the bots' cards are shown.\n\n"
+    "BETTING CONTROLS\n"
+    "F = fold,  C or K = check / call,  R or Enter = bet / raise. No-limit and pot-limit: Up / Down arrows or the mouse wheel change the size, or drag the slider and use the presets. "
+    "Fixed limit: every bet is a set size, so there is just one Bet / Raise button; the panel next to it says how many raises are left before the cap. "
+    "Stud: the bring-in player chooses 'Bring in' or 'Complete'; with an open pair on 4th street you choose the small or the big bet (B = big bet).\n\n"
+    "DRAWING\n"
+    "When it's your turn to draw, click the cards you want to throw away (or press 1-5) - they lift up and say TOSS - then press Draw (D or Enter). Stand pat (P) keeps all your cards. "
+    "In Training the coach's cards are outlined in green, and 'Coach's cards' marks them for you. Each seat shows how many cards that player drew.\n\n"
+    "YOUR CARDS\n"
+    "Drag a card to move it, or click one card and then another to swap them. Sort orders them by rank, then by suit, and is kept for the next hands. "
+    "Stud cards stay in the order they were dealt; the ones marked DOWN are seen only by you.\n\n"
+    "OTHER KEYS\n"
+    "Space or Enter deals the next hand (and continues in Learn mode).  Esc opens the menu,  H the rules of the game you're playing,  T the glossary,  L the lessons,  M mutes the sound.  "
+    "In Hold'em Training, G opens the preflop charts.\n\n"
     "LEARNING THE LANGUAGE\n"
-    "Press T (or the Glossary button) for a searchable glossary of every poker term the game uses. During play, hover the mouse over a stat box, a seat's position, "
-    "the VPIP / PFR numbers or a grade to see what it means. Under the coach's reasons, the TERMS row lists the jargon it used: hover a term for its definition, click it to open the glossary.\n\n"
+    "Press T for a searchable glossary of every poker term the game uses. Hover over a stat box, a seat's position, the VPIP / PFR numbers or a grade to see what it means. "
+    "Under the coach's reasons and the rules coach, the TERMS row lists the jargon used: hover a term for its definition, click it to open the glossary.\n\n"
     "LEARNING TO THINK LIKE A PLAYER\n"
-    "In quiz mode the coach panel shows a 'think it through' checklist for every decision: position, the action so far, the board, what each opponent's betting says about their hand, "
-    "the price, and your plan. It never gives the answer - work through it, act, then compare with the coach. Lessons 7-11 (L) cover thinking through a hand, ranges, "
-    "reading real players, bankroll and tilt, and how to keep improving, including live-casino tips.";
+    "In quiz mode the coach panel shows a 'think it through' checklist for every decision. Lessons 7-11 (L) cover thinking through a hand, ranges, reading real players, "
+    "bankroll and tilt, and how to keep improving; lessons 12-16 cover stud, hi-lo split games, lowball and Razz, draw games and Badugi, and mixed games.";
 
 typedef struct { const char *title, *body; } Lesson;
 static const Lesson LESSONS[] = {
@@ -1419,26 +2032,181 @@ static const Lesson LESSONS[] = {
       "The rake takes a slice of every pot, so marginal calls and loose play cost even more in real games.\n\n"
       "FURTHER STEPS\n"
       "When the basics are solid, study with real solver outputs and range-training tools, track your results over thousands of hands, and discuss tough hands with stronger players." },
+    { "12. Seven-card stud",
+      "Stud has no shared cards, but most of the information is in plain sight: four of each player's seven cards are dealt face up. Good stud players watch every up card, "
+      "including the ones folded players showed - those cards are DEAD and can't come to anyone.\n\n"
+      "STARTING HANDS (3RD STREET)\n"
+      "The best start is three of a kind ('rolled up' - about 1 deal in 425). Then big pairs, especially with a high door card that makes the pair hidden. "
+      "Three cards to a flush or a straight are playable only if they're LIVE: if three of your suit are already showing around the table, the flush draw is mostly gone. "
+      "Small pairs with a weak kicker are a trap: they rarely improve enough.\n\n"
+      "THE BRING-IN AND COMPLETING\n"
+      "The lowest up card must bring in for a small forced bet. Anyone after them can complete to a full small bet. Completing with a strong hand, or with a high card showing "
+      "when the bring-in is weak, often wins the antes straight away.\n\n"
+      "WHO ACTS FIRST CHANGES EVERY STREET\n"
+      "From 4th street the best hand showing acts first, so position moves around. A pair showing (an open pair) on 4th street allows the big bet in seven-card stud.\n\n"
+      "5TH STREET IS THE BIG DECISION\n"
+      "The bets double on 5th street. Before calling there, ask: am I ahead, or do I have a strong, live draw? Calling 5th street usually commits you to the end, "
+      "so this is the street to fold mediocre hands.\n\n"
+      "COUNTING OUTS WITH DEAD CARDS\n"
+      "Count the cards that help you, then subtract the ones you can see elsewhere. A flush draw with two of your suit showing in other hands has 7 outs, not 9." },
+    { "13. Hi-lo split games",
+      "In Omaha Hi-Lo and Stud Hi-Lo the pot is split between the best high hand and the best low hand. A low must be five different cards of 8 or lower (an 'eight or better'); "
+      "straights and flushes don't spoil a low, and the ace counts low. If nobody qualifies, the high hand wins everything.\n\n"
+      "PLAY TO SCOOP\n"
+      "Winning half the pot often barely pays for the chips you put in, especially when two players tie for low and each gets a quarter. The money is in SCOOPING - winning both halves - "
+      "so the best hands can win high and low: A-2-3-4, A-2-3-K double-suited, or a low hand with a flush draw.\n\n"
+      "THE NUT LOW AND COUNTERFEITING\n"
+      "A-2 is the best low start: it makes the nut low whenever three different low cards come. But if the board pairs one of your low cards (a 2 comes when you hold A-2), "
+      "your low is COUNTERFEITED and can lose. Holding a third low card (A-2-3) protects you.\n\n"
+      "OMAHA HI-LO\n"
+      "You use exactly two of your cards for each half - they may be different cards. The board needs three different cards of 8 or lower for any low to be possible. "
+      "Big pairs and broadway cards are weaker than in Omaha high: they can only win half, and only when no low comes.\n\n"
+      "STUD HI-LO\n"
+      "Three low cards on 3rd street are strong starting hands; a low door card scares opponents because it threatens a low. High hands want to make the low players pay early, "
+      "before 5th street." },
+    { "14. Lowball and Razz",
+      "In lowball the LOWEST hand wins. There are two ways to rank low hands.\n\n"
+      "ACE-TO-FIVE (RAZZ)\n"
+      "Aces are low and straights and flushes don't count, so the best hand is 5-4-3-2-A, the 'wheel'. Compare from the top card down: 7-5-4-3-2 beats 8-4-3-2-A. "
+      "Pairs are bad. Razz is seven-card stud for the low: you use your best five of seven cards.\n"
+      "Good Razz starts are three different cards of 8 or lower, best with an ace or deuce: A-2-3 is the top hand. In Razz the HIGHEST up card brings in, "
+      "and a king showing is the worst door card. When an opponent catches a high card or a pair on 4th or 5th street (a 'brick'), they are often drawing badly - attack.\n\n"
+      "DEUCE-TO-SEVEN (2-7 TRIPLE DRAW, SINGLE DRAW)\n"
+      "Aces are high, and straights and flushes COUNT against you. The best hand is 7-5-4-3-2 of mixed suits; A-2-3-4-5 is just ace high, and 2-3-4-5-6 is a straight. "
+      "The deuce and the seven are key cards: hands with a 2 and no pairs are the best starts, and an 8 or 9 low is a decent finished hand in triple draw.\n\n"
+      "READING LOW HANDS\n"
+      "Say the highest card first: '7-6 low' (7-6-4-3-2). A 'smooth' hand has low cards under the top one (8-4-3-2-A is a smooth eight); a 'rough' one has high second cards (8-7-6-5-3)." },
+    { "15. Draw games and Badugi",
+      "In draw games nobody sees anyone else's cards, so the number of cards each player draws is the main clue. Standing pat says 'my hand is made'. Drawing one says 'close'. "
+      "Drawing three or more says 'starting over'.\n\n"
+      "FIVE-CARD DRAW: WHAT TO DRAW\n"
+      "With a pair, keep it and draw three (about 29% to improve). Two pair: draw one (a full house about 1 time in 12). Three of a kind: draw two. "
+      "Four to a flush: draw one (9 outs, about 19%). Four to an open-ended straight: draw one (8 outs, about 17%). Never draw to an inside straight unless the price is very good.\n\n"
+      "TRIPLE DRAW\n"
+      "With three draws, a hand that's two cards away still has time. Watch how many cards each player takes on each draw: someone who draws one, then one, then stands pat has probably made a hand. "
+      "Sometimes it's right to 'break' a finished but weak hand (throw away the 9 from 9-7-5-3-2) to draw to a better one - only when draws are left.\n\n"
+      "BADUGI\n"
+      "Four cards, three draws. A badugi is four cards of four different suits and four different ranks; the lowest wins, so A-2-3-4 in four suits is the best. "
+      "Cards that share a suit or a rank don't count, which leaves a three-card or two-card hand: any four-card badugi beats any three-card hand. "
+      "A good three-card hand (A-2-3 in three suits) drawing one is a fine start; a pat badugi with a king is weak against players with three draws left." },
+    { "16. Mixed games",
+      "HORSE and 8-Game rotate through several games, one orbit each. The challenge is switching your head: the rules, the hand rankings and the betting change every few hands. "
+      "The table title and the top bar always show the game now and the one coming next.\n\n"
+      "BEFORE EACH NEW GAME, ASK\n"
+      "Is it high, low or split? Are there blinds or antes and a bring-in? How many cards do I get, and how many are shared? Is the betting fixed, pot-limit or no-limit? "
+      "Press H to read the rules of the game you're in.\n\n"
+      "FIXED-LIMIT STRATEGY IN ONE PAGE\n"
+      "Most of the rotation is fixed limit. You can't push people off a hand with a big bet, so: the pot often lays you a good price, which means more calls with draws than in no-limit. "
+      "Bluffs work less often, and value bets matter more - bet your good hands on every street. Raising early (when bets are small) is how you build a pot, because later the bets double. "
+      "On the river, call when the pot is big compared to the last bet unless you're sure you're beaten.\n\n"
+      "MISTAKES THAT COST THE MOST\n"
+      "Misreading a low (in 2-7 an A-2-3-4-5 is NOT a good hand), forgetting that Omaha needs exactly two of your cards, and playing big-bet hands in limit pots. "
+      "Slow down for the first few hands of each game." },
 };
 #define NLESSONS (int)(sizeof LESSONS / sizeof LESSONS[0])
 
+// help pages in menu order: the app, then every game, then the mixed games
+static const int HELP_ORDER[V_COUNT] = { V_HOLDEM, V_OMAHA, V_OMAHA8, V_OMAHA5, V_SHORTDECK, V_STUD, V_STUD8, V_RAZZ, V_DRAW5, V_TD27, V_SD27, V_BADUGI };
+
+// a rule-sheet section title: a short line in capitals ("HAND RANKINGS (best to worst)": the part in brackets may be lower case)
+static bool IsHeading(const char *s, int n) {
+    if (n < 3 || n > 60 || !isupper((unsigned char)s[0])) return false;
+    for (int i = 0; i < n && s[i] != '('; i++) if (islower((unsigned char)s[i])) return false;
+    return true;
+}
+
+// text with headings in bold; returns the height
+static float SheetText(const char *body, float x, float y, float w, bool draw) {
+    float yy = y;
+    const char *p = body;
+    char line[1400];
+    while (*p) {
+        const char *e = strchr(p, '\n');
+        int n = e ? (int)(e - p) : (int)strlen(p);
+        if (n == 0) yy += 12;
+        else if (IsHeading(p, n)) {
+            snprintf(line, sizeof line, "%.*s", n, p);
+            if (draw) Txt(fBold, line, x, yy + 2, 17, (Color){ 40, 70, 120, 255 });
+            yy += 26;
+        } else {
+            snprintf(line, sizeof line, "%.*s", n, p);
+            yy += Wrap(fReg, line, x, yy, w, 17, 25, C_INK, draw);
+        }
+        p += n + (e ? 1 : 0);
+    }
+    return yy - y;
+}
+
 static void DrawHelp(void) {
-    Rectangle r = { VW / 2.0f - 470, 50, 940, 800 };
+    Rectangle r = { VW / 2.0f - 580, 30, 1160, 840 };
     Panel(r);
-    DrawPages(r, "How to Play", HELP_TEXT, &helpScroll);
-    if (Button((Rectangle){ r.x + r.width / 2 - 100, r.y + r.height - 66, 200, 46 }, "Close", true, C_BLUE)) showHelp = false;
+    float lx = r.x + 28, lw = 236, cy = r.y + 24;
+    Txt(fBold, "Rules & help", lx, cy, 26, C_INK);
+    cy += 46;
+    if (Choice((Rectangle){ lx, cy, lw, 34 }, "Using Poker Trainer", helpPage == -1)) { helpPage = -1; helpScroll = 0; }
+    cy += 46;
+    Txt(fBold, "RULES OF EACH GAME", lx, cy, 13, C_MUTED);
+    cy += 20;
+    int playing = gameStarted ? game.variant : -1;
+    for (int i = 0; i < V_COUNT + MIX_COUNT - 1; i++) {
+        int page = i < V_COUNT ? HELP_ORDER[i] : MixPage(i - V_COUNT + 1);
+        const char *nm = i < V_COUNT ? varInfo(page)->name : mixName(i - V_COUNT + 1);
+        if (i == V_COUNT) cy += 8;
+        Rectangle b = { lx, cy, lw, 32 };
+        if (Choice(b, nm, helpPage == page)) { helpPage = page; helpScroll = 0; }
+        if (page == playing || (gameStarted && game.mix && page == MixPage(game.mix)))
+            DrawRectangleRoundedLinesEx((Rectangle){ b.x - 3, b.y - 3, b.width + 6, b.height + 6 }, 0.35f, 8, 2.5f, C_GOLD);
+        cy += 38;
+    }
+    if (gameStarted) Txt(fReg, "gold outline: the game you're playing", lx, cy + 4, 13, C_MUTED);
+    // the page
+    static char body[12000];
+    char title[96];
+    if (helpPage < 0) { snprintf(title, sizeof title, "Using Poker Trainer"); snprintf(body, sizeof body, "%s", HELP_TEXT); }
+    else if (helpPage >= V_COUNT) {
+        int mix = helpPage - V_COUNT + 1;
+        snprintf(title, sizeof title, "%s", mixName(mix));
+        rulesMixedSheet(mix, body, sizeof body);
+    } else {
+        int lim = gameStarted && helpPage == game.variant ? game.limit
+                : !gameStarted && !setMix && helpPage == setVariant ? setLimit : varInfo(helpPage)->defLimit;
+        snprintf(title, sizeof title, "%s  (%s)", varInfo(helpPage)->name, limitName(lim));
+        rulesSheet(helpPage, lim, body, sizeof body);
+    }
+    float px = r.x + 300, pw = r.x + r.width - 40 - px;
+    TxtC(fBold, title, px + pw / 2, r.y + 26, 30, C_INK);
+    Rectangle clip = { px, r.y + 80, pw, r.height - 170 };
+    float total = SheetText(body, clip.x, 0, clip.width - 10, false);
+    float maxS = total > clip.height ? total - clip.height : 0;
+    if (Hover(clip)) helpScroll -= GetMouseWheelMove() * 50;
+    if (KeyHit(KEY_DOWN) || KeyHit(KEY_PAGE_DOWN)) helpScroll += KeyHit(KEY_DOWN) ? 50 : clip.height - 40;
+    if (KeyHit(KEY_UP) || KeyHit(KEY_PAGE_UP)) helpScroll -= KeyHit(KEY_UP) ? 50 : clip.height - 40;
+    if (helpScroll < 0) helpScroll = 0;
+    if (helpScroll > maxS) helpScroll = maxS;
+    ClipBegin(clip);
+    SheetText(body, clip.x, clip.y - helpScroll, clip.width - 10, true);
+    EndScissorMode();
+    if (maxS > 0) TxtR(fReg, helpScroll < maxS ? "scroll for more" : "", clip.x + clip.width, clip.y + clip.height + 4, 13, C_MUTED);
+    if (Button((Rectangle){ px + pw / 2 - 100, r.y + r.height - 70, 200, 46 }, "Close", true, C_BLUE)) showHelp = false;
 }
 
 static void DrawLessons(void) {
     Rectangle r = { VW / 2.0f - 470, 50, 940, 800 };
     Panel(r);
-    // jump straight to a lesson: fundamentals (1-6) and real-table skills (7+)
-    float bw = 52, bx = r.x + r.width / 2 - (NLESSONS * (bw + 6) - 6) / 2;
-    for (int i = 0; i < NLESSONS; i++)
-        if (Choice((Rectangle){ bx + i * (bw + 6), r.y + 16, bw, 30 }, TextFormat("%d", i + 1), lessonPage == i)) { lessonPage = i; helpScroll = 0; }
-    TxtR(fReg, "Basics", bx - 10, r.y + 23, 13, C_MUTED);
-    Txt(fReg, "At a real table", bx + NLESSONS * (bw + 6) + 4, r.y + 23, 13, C_MUTED);
-    DrawPages((Rectangle){ r.x, r.y + 40, r.width, r.height - 40 }, LESSONS[lessonPage].title, LESSONS[lessonPage].body, &helpScroll);
+    // jump straight to a lesson: Hold'em & Omaha basics (1-6), real-table skills (7-11), the other games (12+)
+    static const struct { int from, to; const char *name; } GROUPS[3] = { { 0, 5, "Hold'em & Omaha" }, { 6, 10, "At a real table" }, { 11, NLESSONS - 1, "Other games" } };
+    float bw = 44, gap = 6, ggap = 18, total = NLESSONS * (bw + gap) - gap + 2 * ggap;
+    float bx = r.x + r.width / 2 - total / 2;
+    for (int gi = 0; gi < 3; gi++) {
+        float gx = bx;
+        for (int i = GROUPS[gi].from; i <= GROUPS[gi].to; i++) {
+            if (Choice((Rectangle){ bx, r.y + 14, bw, 30 }, TextFormat("%d", i + 1), lessonPage == i)) { lessonPage = i; helpScroll = 0; }
+            bx += bw + gap;
+        }
+        TxtC(fReg, GROUPS[gi].name, (gx + bx - gap) / 2, r.y + 48, 13, C_MUTED);
+        bx += ggap;
+    }
+    DrawPages((Rectangle){ r.x, r.y + 56, r.width, r.height - 56 }, LESSONS[lessonPage].title, LESSONS[lessonPage].body, &helpScroll);
     float by = r.y + r.height - 66;
     if (Button((Rectangle){ r.x + 40, by, 160, 46 }, "< Previous", lessonPage > 0, C_BLUE) || (lessonPage > 0 && KeyHit(KEY_LEFT))) { lessonPage--; helpScroll = 0; }
     if (Button((Rectangle){ r.x + r.width - 200, by, 160, 46 }, "Next >", lessonPage < NLESSONS - 1, C_BLUE) || (lessonPage < NLESSONS - 1 && KeyHit(KEY_RIGHT))) { lessonPage++; helpScroll = 0; }
@@ -1568,15 +2336,29 @@ static void DrawGlossary(void) {
     if (Button((Rectangle){ r.x + r.width / 2 - 100, r.y + r.height - 70, 200, 46 }, "Close", true, C_BLUE)) showGloss = false;
 }
 
+static int CurrentPage(void) { return gameStarted ? game.variant : MenuPage(); }
+
 static void DrawTopBar(void) {
     if (Button((Rectangle){ 20, 14, 96, 34 }, "Menu", true, (Color){ 60, 66, 80, 255 })) showMenu = true;
-    if (Button((Rectangle){ 124, 14, 96, 34 }, "Help", true, (Color){ 60, 66, 80, 255 })) { showHelp = true; helpScroll = 0; }
+    if (Button((Rectangle){ 124, 14, 96, 34 }, "Rules", true, (Color){ 60, 66, 80, 255 })) OpenHelp(CurrentPage());
     if (Button((Rectangle){ 228, 14, 120, 34 }, "Glossary", true, (Color){ 60, 66, 80, 255 })) OpenGlossary(-1);
     if (Button((Rectangle){ 356, 14, 110, 34 }, "Lessons", true, (Color){ 60, 66, 80, 255 })) { showLessons = true; helpScroll = 0; }
     if (!gameStarted) return;
-    char t[96];
-    snprintf(t, sizeof t, "%s / %s blinds  -  %s", Money(game.sbAmt), Money(game.bbAmt), gameMode == MODE_TRAIN ? "Training" : "Play");
-    TxtR(fReg, t, 1160, 22, 16, C_DIM);
+    char t[200], st[64], mx[110] = "";
+    if (IsStud()) snprintf(st, sizeof st, "%s/%s limit, ante %s", Money(game.smallBet), Money(game.bigBet), Money(game.ante));
+    else if (gameIsFixed(&game)) snprintf(st, sizeof st, "%s/%s limit", Money(game.smallBet), Money(game.bigBet));
+    else snprintf(st, sizeof st, "%s / %s blinds", Money(game.sbAmt), Money(game.bbAmt));
+    if (game.mix) {                  // mixed games: what's coming
+        const MixGame *m;
+        int cnt = mixGames(game.mix, &m), left = game.n - game.mixHands;
+        const MixGame *nx = &m[(game.mixIdx + 1) % cnt];
+        snprintf(mx, sizeof mx, "%s: %s now, %s %s  -  ", mixName(game.mix), varInfo(game.variant)->shortName, varInfo(nx->variant)->shortName,
+                 left <= 1 ? "next hand" : TextFormat("in %d hands", left));
+    }
+    snprintf(t, sizeof t, "%s%s  -  %s", mx, st, gameMode == MODE_TRAIN ? "Training" : gameMode == MODE_LEARN ? "Learn the rules" : "Play");
+    float sz = 16;
+    while (sz > 12 && TxtW(fReg, t, sz) > 1160 - 480) sz -= 1;
+    TxtR(fReg, t, 1160, 22 + (16 - sz) / 2, sz, C_DIM);
 }
 
 // ---------------------------------------------------------------- autotest (screenshots)
@@ -1668,6 +2450,95 @@ static void AutoTest(void) {
         if (game.handOver && atFrame > 40) { static int z = 0; if (z++ == 0) Shot("play_over"); NextHand(); atFrame = 6; }
         if (atFrame > 4000) atStage = 5;
         break;
+    case 5:                          // Learn the rules: seven-card stud, the rule sheet, pauses, your turn, the showdown
+        if (atFrame == 5) { PickGame(TAB_STUD, 0); setMode = MODE_LEARN; setOpp = 4; StartNewGame(); }
+        if (atFrame == 20) { Shot("learn_sheet"); helpScroll = 700; }
+        if (atFrame == 24) { Shot("learn_sheet_scrolled"); showHelp = false; atStage = 51; atFrame = 0; }
+        break;
+    case 51: {
+        static int k = 0, ps = 0, ho = 0;
+        if (paused && atFrame > 20) { if (ps++ < 2) Shot("learn_paused"); paused = false; atFrame = 0; }
+        if (game.toAct == game.human && !game.handOver && atFrame > 20) {
+            if (k == 0 || k == 3) Shot("learn_turn");
+            Legal l;
+            gameLegal(&game, &l);
+            HumanAct((Action){ l.canCheck && !l.bringIn ? A_CHECK : A_CALL, 0 });
+            k++;
+            atFrame = 0;
+        }
+        if (game.handOver && atFrame > 30) { if (ho++ < 2) Shot("learn_showdown"); NextHand(); atFrame = 0; }
+        if (k > 10 || ho > 3 || atFrame > 3000) { atStage = 6; atFrame = 0; }
+        break;
+    }
+    case 6:                          // Training in 2-7 triple draw: tips, marking discards, the draw
+        if (atFrame == 5) { PickGame(TAB_DRAW, 1); setMode = MODE_TRAIN; setOpp = 3; hintsBefore = true; StartNewGame(); atStage = 61; atFrame = 0; }
+        break;
+    case 61: {
+        static int k = 0, ds = 0, ho = 0;
+        if (game.toAct == game.human && !game.handOver && atFrame > 30 && advKey == DecisionKey()) {
+            Legal l;
+            gameLegal(&game, &l);
+            if (l.draw) {
+                if (atFrame == 31) arr.marks = tips.amount;
+                if (atFrame == 34) { if (ds++ < 3) Shot("draw_marked"); HumanAct((Action){ A_DRAW, arr.marks }); atFrame = 0; k++; }
+            } else {
+                if (k == 1 || k == 5) Shot("tips_coach");
+                HumanAct((Action){ tips.act, tips.amount });
+                atFrame = 0;
+                k++;
+            }
+        }
+        if (game.handOver && atFrame > 30) { if (ho++ == 0) Shot("draw_handover"); NextHand(); atFrame = 0; }
+        if (k > 16 || atFrame > 3000) { atStage = 7; atFrame = 0; }
+        break;
+    }
+    case 7:                          // Omaha hi-lo: call down until a split pot, then look at the coach and the rules tab
+        if (atFrame == 5) { PickGame(TAB_BOARD, 2); setMode = MODE_TRAIN; setOpp = 3; StartNewGame(); atStage = 71; atFrame = 0; }
+        break;
+    case 71: {
+        static int hands = 0, sub = 0;
+        if (game.toAct == game.human && !game.handOver && atFrame > 20 && advKey == DecisionKey()) {
+            Legal l;
+            gameLegal(&game, &l);
+            HumanAct((Action){ l.canCheck ? A_CHECK : A_CALL, 0 });
+            atFrame = 0;
+        }
+        if (game.handOver && atFrame > 30) {
+            bool split = game.showdown && game.pots[0].loMask;
+            if (split && sub == 0) { Shot("hilo_showdown"); panelTab = PT_RULES; sub = 1; atFrame = 26; }
+            else if (split && sub == 1 && atFrame > 29) { Shot("hilo_rules"); panelTab = PT_COACH; sub = 2; }
+            else if (!split || sub == 2) { hands++; NextHand(); atFrame = 0; if (sub == 2) { atStage = 8; atFrame = 0; } }
+        }
+        if (hands > 40 || atFrame > 3000) { atStage = 8; atFrame = 0; }
+        break;
+    }
+    case 8:                          // HORSE in Play mode: the table in each of the first games of the rotation
+        if (atFrame == 5) { PickGame(TAB_MIXED, 0); setMode = MODE_PLAY; setOpp = 2; StartNewGame(); atStage = 81; atFrame = 0; }
+        break;
+    case 81: {
+        static int lastV = -1, games = 0;
+        if (game.toAct == game.human && !game.handOver && atFrame > 20) {
+            if (game.variant != lastV) { lastV = game.variant; games++; Shot(TextFormat("horse_%s", varInfo(game.variant)->shortName)); }
+            Legal l;
+            gameLegal(&game, &l);
+            HumanAct((Action){ l.canCheck && !l.bringIn ? A_CHECK : A_CALL, 0 });
+            atFrame = 0;
+        }
+        if (game.handOver && atFrame > 30) { NextHand(); atFrame = 0; }
+        if (games > 4 || atFrame > 3000) { OpenHelp(game.variant); atStage = 9; atFrame = 0; }
+        break;
+    }
+    case 9:                          // the menu tabs, the help pages and the new lessons
+        if (atFrame == 3) Shot("rules_current");
+        if (atFrame == 5) { OpenHelp(-1); }
+        if (atFrame == 8) { Shot("help_app"); showHelp = false; showMenu = true; PickGame(TAB_STUD, 0); }
+        if (atFrame == 11) { Shot("menu_stud"); PickGame(TAB_DRAW, 3); }
+        if (atFrame == 14) { Shot("menu_draw"); PickGame(TAB_MIXED, 1); }
+        if (atFrame == 17) { Shot("menu_mixed"); PickGame(TAB_RAZZ, 0); setMode = MODE_LEARN; }
+        if (atFrame == 20) { Shot("menu_razz_learn"); showMenu = false; showLessons = true; lessonPage = 11; helpScroll = 0; }
+        if (atFrame == 23) { Shot("lesson12"); lessonPage = 14; }
+        if (atFrame == 26) { Shot("lesson15"); showLessons = false; atStage = 10; }
+        break;
     default: CloseWindow(); exit(0);
     }
 }
@@ -1733,14 +2604,20 @@ static void Frame(void) {
         else if (showChart) showChart = false;
         else if (showMenu) { if (gameStarted) showMenu = false; }
         else showMenu = true;
-    } else if (IsKeyPressed(KEY_H) && !showMenu && !showGloss) { showHelp = !showHelp; helpScroll = 0; }
+    } else if (IsKeyPressed(KEY_H) && !showMenu && !showGloss) { if (showHelp) showHelp = false; else OpenHelp(CurrentPage()); }
     else if (IsKeyPressed(KEY_L) && !overlay && gameMode != MODE_TRAIN) { showLessons = true; helpScroll = 0; }
     else if (IsKeyPressed(KEY_T) && !overlay) OpenGlossary(-1);
     else if (IsKeyPressed(KEY_M) && !showGloss) { sndSetMuted(!sndMuted()); Flash(sndMuted() ? "Sound off" : "Sound on"); }
+    // Learn mode: the rule sheet comes up before your first hand of each game (in a mixed game, as each one starts)
+    if (gameStarted && gameMode == MODE_LEARN && !(showMenu || showHelp || showLessons || showChart || showGloss) && !sheetSeen[game.variant]) {
+        sheetSeen[game.variant] = true;
+        OpenHelp(game.variant);
+    }
     overlay = showMenu || showHelp || showLessons || showChart || showGloss;
     gActive = overlay ? 2 : 0;
 
     if (gameStarted && !overlay) UpdateGame(dt);
+    if (gameStarted) PumpEvents();
     sndUpdate(dt);
 #ifdef AUTOTEST
     AutoTest();

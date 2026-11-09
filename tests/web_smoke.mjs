@@ -1,7 +1,7 @@
 // web_smoke.mjs - browser tests for the WebAssembly build (make test-web)
 //
 // Serves build/web with a tiny static server and drives it in headless Chromium:
-// it loads, starts a game with the mouse, plays hands with the keyboard, fills the
+// it loads, starts games from each family with the mouse, plays hands with the keyboard, fills the
 // canvas at any size and pixel ratio, deals different cards on every visit, and shows
 // an error instead of a stuck loading bar when a file is missing.
 import { chromium } from 'playwright';
@@ -70,13 +70,24 @@ for (const [w, h, dpr] of [[1600, 900, 1], [1280, 720, 2], [640, 360, 1], [900, 
     await page.close();
 }
 
+// longest gap between two animation frames over the next 10 frames: a slow coach / bot decision would show here
+const frameGap = page => page.evaluate(() => new Promise(r => {
+    let last = performance.now(), max = 0, n = 0;
+    const f = t => { max = Math.max(max, t - last); last = t; if (++n < 10) requestAnimationFrame(f); else r(max); };
+    requestAnimationFrame(f);
+}));
+
+// menu coordinates (virtual canvas): game tabs, the games in a tab, modes, "set all bots", Start
+const TAB = { board: [680, 156], stud: [788, 156], razz: [895, 156], draw: [1002, 156], mixed: [1110, 156] };
+const OMAHA = [788, 205], TRIPLE_DRAW = [828, 205], LEARN = [896, 339], ALL_HARD = [1056, 502], START = [555, 793], GLOSSARY = [1045, 793];
+
 // 2. Start from the menu with the mouse (Omaha, all Hard bots), then play hands with the keyboard
 {
     const { page, errors } = await open(1280, 720, 2);
     const menu = await canvasPng(page);
-    await click(page, 940, 260);   // Omaha
-    await click(page, 1056, 486);  // set all bots to Hard
-    await click(page, 555, 781);   // Start Game
+    await click(page, ...OMAHA);
+    await click(page, ...ALL_HARD);
+    await click(page, ...START);
     await page.waitForTimeout(1500);
     const table = await canvasPng(page);
     check(!menu.equals(table), 'mouse click on Start Game leaves the menu');
@@ -86,12 +97,7 @@ for (const [w, h, dpr] of [[1600, 900, 1], [1280, 720, 2], [640, 360, 1], [900, 
         await page.keyboard.press(i % 4 === 0 ? 'r' : 'c');
         await page.waitForTimeout(250);
         await page.keyboard.press('Space');
-        // longest gap between two animation frames: a slow coach / bot decision would show here
-        worst = Math.max(worst, await page.evaluate(() => new Promise(r => {
-            let last = performance.now(), max = 0, n = 0;
-            const f = t => { max = Math.max(max, t - last); last = t; if (++n < 10) requestAnimationFrame(f); else r(max); };
-            requestAnimationFrame(f);
-        })));
+        worst = Math.max(worst, await frameGap(page));
     }
     check(errors.length === 0, `40 hands of Omaha vs Hard bots without errors: ${errors.join(' | ')}`);
     check(worst < 1000, `no frame takes over 1 s during play (worst ${Math.round(worst)} ms)`);
@@ -107,10 +113,36 @@ for (const [w, h, dpr] of [[1600, 900, 1], [1280, 720, 2], [640, 360, 1], [900, 
     await page.close();
 }
 
+// 2b. The other families from the new menu: seven-card stud (bring-in, fixed limit) and 2-7 triple draw
+// (Training: the tips coach and the draw), both against Hard bots; Razz in Learn the rules mode
+for (const [name, clicks, learn] of [['Seven-card stud', [TAB.stud], false], ['2-7 Triple Draw', [TAB.draw, TRIPLE_DRAW], false], ['Razz (Learn)', [TAB.razz, LEARN], true]]) {
+    const { page, errors } = await open(1280, 720, 1);
+    const menu = await canvasPng(page);
+    for (const c of clicks) await click(page, ...c);
+    await click(page, ...ALL_HARD);
+    await click(page, ...START);
+    await page.waitForTimeout(1200);
+    if (learn) { await page.keyboard.press('Escape'); await page.waitForTimeout(300); }   // the rule sheet opens first
+    check(!menu.equals(await canvasPng(page)), `${name}: the game starts from the menu`);
+    let worst = 0;
+    for (let i = 0; i < 30; i++) {
+        await page.keyboard.press('1');       // draw phase: mark the first card ...
+        await page.keyboard.press('d');       // ... and draw it
+        await page.keyboard.press('c');       // betting: call / check / bring in
+        await page.waitForTimeout(200);
+        await page.keyboard.press('Space');   // next hand, or continue in Learn mode
+        worst = Math.max(worst, await frameGap(page));
+    }
+    check(errors.length === 0, `${name}: 30 rounds of play without errors: ${errors.join(' | ')}`);
+    check(worst < 1000, `${name}: no frame takes over 1 s (worst ${Math.round(worst)} ms)`);
+    console.log(`  ${name}: worst frame gap ${Math.round(worst)} ms`);
+    await page.close();
+}
+
 // 3. Keyboard text entry, including spaces, reaches the glossary search box
 {
     const { page, errors } = await open(1600, 900, 1);
-    await click(page, 1045, 781);   // menu: Glossary
+    await click(page, ...GLOSSARY);   // menu: Glossary
     const empty = await canvasPng(page);
     await page.keyboard.type('pot odds');
     await page.waitForTimeout(300);

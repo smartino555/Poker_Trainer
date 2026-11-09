@@ -218,7 +218,12 @@ static const GlossEntry G[] = {
     { "Coach recommends", GC_APP, "", "The play the coach would make, with its size. 'mix ~X%' means a balanced player sometimes takes the listed alternative instead, about X% of the time." },
     { "Hints / Quiz mode", GC_APP, "", "Hints on: the recommendation shows before you act. Quiz mode: it stays hidden and you get a 'think it through' checklist instead; you're graded after you act." },
     { "Leak", GC_APP, "leak", "A repeated mistake that costs money over time, like calling without the odds. The session panel tracks your two biggest leaks." },
-    { "Bot levels", GC_APP, "", "Easy: loose-passive calling station. Medium: tight but ignores position and ranges. Hard: plays the coach's strategy, mixes bluffs and adapts." },
+    { "Bot levels", GC_APP, "", "Easy: loose-passive calling station. Medium: tight but ignores position and ranges (in the other games: plays its share of the pot against random hands). "
+                                "Hard: plays the coach's strategy, mixes bluffs and adapts; in the other games it plays the coach's tips." },
+    { "Coach tips", GC_APP, "", "In every game except Hold'em and Omaha the coach gives tips instead of grades: your share of the pot against the hands the others could hold, "
+                                "the price of calling, and which cards to draw. The session score counts how often you played the same as the tip." },
+    { "Learn the rules mode", GC_APP, "", "A mode for learning a new game: the rules coach explains each step of the hand as it happens, the game pauses when new cards come "
+                                          "(press Continue, or turn Pause off), and the rule sheet opens before your first hand of each game." },
 };
 
 #define NG (int)(sizeof G / sizeof G[0])

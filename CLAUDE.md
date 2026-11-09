@@ -7,7 +7,7 @@ Poker Trainer: poker against 1-5 bots in C + raylib, with a coach. Desktop build
 ```sh
 make            # build ./poker (raylib via pkg-config or Homebrew)
 make run
-make test       # unit, scenario and fuzz tests (tests/test_main.c), ~6,750 checks, must stay at 0 failed
+make test       # unit, scenario and fuzz tests (tests/test_main.c), ~6,780 checks, must stay at 0 failed
 make sim        # headless bot-vs-bot simulator: ./sim <hands> <game> [levels...]
                 #   game: 0-11 (see enum in src/variants.h), h = HORSE, e = 8-Game
                 #   SIM_LIMIT=0|1|2 forces NL / PL / fixed; SIM_BB=15 short stacks
@@ -15,7 +15,10 @@ make nash       # re-solve push/fold ranges (rewrites src/pushfold.c, ~20 s)
 make web        # WebAssembly build into build/web (Emscripten); build/web is committed
 make test-wasm  # test suite under node with the web stack size
 make test-web   # Playwright smoke test of the web build (clicks menu coordinates!)
+make shots      # AUTOTEST build: plays through every screen and saves PNGs to build/shots (needs a display)
 ```
+
+In a sandbox where `/opt/homebrew` is read-only, `make web` / `make test-wasm` fail on Emscripten's cache lock: copy `$(brew --prefix emscripten)/libexec/cache` somewhere writable and set `EM_CACHE` to it.
 
 Launching the raylib window from Claude Code needs the sandbox disabled; `open ./poker` works.
 
@@ -34,8 +37,8 @@ Everything except `src/main.c` and `src/sound.c` is plain C with no raylib, so i
 | `src/rules.c/.h` | The rules coach: rule sheets per game, plain-English narration of engine events, "what you may do now", showdown explanations. |
 | `src/ai.c` | Bot dispatch: `aiClassic()` games (Hold'em, Omaha) use the classic Easy/Medium/Hard bots; all others go to `basicBot()`. |
 | `src/glossary.c` | Glossary terms; tests check every jargon word the coaches use has an entry. ASCII only (the UI font has no other glyphs). |
-| `src/arrange.c` | Your card order (drag, click-swap, sort). |
-| `src/main.c` | raylib UI: menu, table, controls, coach panel, overlays, AUTOTEST screenshot mode. |
+| `src/arrange.c` | Your card order (drag, click-swap, sort) and the discard marks in a draw (`markMode`). |
+| `src/main.c` | raylib UI: menu (game tabs Board / Stud / Razz / Draw / Mixed; modes Play / Learn the rules / Training), table (board, stud and draw layouts), controls (NL/PL slider, fixed limit, bring-in, open pair, draw), side panel (Coach, Rules, Hand log), Rules & help overlay, lessons, AUTOTEST screenshot mode. |
 
 ### Engine conventions
 
@@ -53,6 +56,9 @@ Everything except `src/main.c` and `src/sound.c` is plain C with no raylib, so i
 - Bots must never send an illegal action (tested). New games or structures need a fuzz entry (`testFuzzAll`) and `make sim` should show Hard > Medium > Easy.
 - After changing the UI, rebuild `build/web` with `make web` (it is committed) and update `tests/web_smoke.mjs` if menu coordinates move.
 
-## Work in progress (Oct 2026)
+## UI notes
 
-Adding every game with a rules coach (plan: `~/.claude/plans/synchronous-watching-wind.md`). Done and tested: engine, evaluators, bots, simulator, the rules coach (`src/rules.c`), basic tips (`adviseBasic`) and the "Games & rules" glossary category. Still to do: the UI in `src/main.c` (game picker with tabs Board / Stud / Razz / Draw / Mixed, where Razz gets its own tab but is still a stud game underneath; stud/draw tables, fixed-limit controls, Rules tab and "Learn the rules" mode), lessons, README. The menu still offers only Hold'em and Omaha.
+- Modes: `MODE_PLAY`, `MODE_TRAIN`, `MODE_LEARN`. The rules coach runs in every mode: `PumpEvents()` feeds each engine event to `rulesNarrate()` once per frame, so the "first time" memory stays in order. Learn mode pauses (`paused`) when new cards come, unless you are the one to act.
+- Training uses `advise()` (graded) when `aiClassic(variant)`, else `adviseBasic()` (tips, no grades). Limit Hold'em / Omaha keep the graded coach; its headline is rewritten to the fixed size.
+- Your card order (`Arrange`) is display only; in a draw, `arr.marks` (bit per hole index) is the discard mask sent with `A_DRAW`. Stud cards are not rearranged.
+- Menu coordinates are used by `tests/web_smoke.mjs`; move them and update the test.
