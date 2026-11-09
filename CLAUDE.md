@@ -7,7 +7,7 @@ Poker Trainer: poker against 1-5 bots in C + raylib, with a coach. Desktop build
 ```sh
 make            # build ./poker (raylib via pkg-config or Homebrew)
 make run
-make test       # unit, scenario and fuzz tests (tests/test_main.c), ~6,300 checks, must stay at 0 failed
+make test       # unit, scenario and fuzz tests (tests/test_main.c), ~6,750 checks, must stay at 0 failed
 make sim        # headless bot-vs-bot simulator: ./sim <hands> <game> [levels...]
                 #   game: 0-11 (see enum in src/variants.h), h = HORSE, e = 8-Game
                 #   SIM_LIMIT=0|1|2 forces NL / PL / fixed; SIM_BB=15 short stacks
@@ -55,4 +55,4 @@ Everything except `src/main.c` and `src/sound.c` is plain C with no raylib, so i
 
 ## Work in progress (Oct 2026)
 
-Adding every game with a rules coach (plan: `~/.claude/plans/synchronous-watching-wind.md`). Engine, evaluators, bots, simulator and tests are done. `src/rules.c` is written but not yet built: add it to `ENGINE` in the Makefile. Still to do: glossary terms for the rules text, the UI in `src/main.c` (game picker, stud/draw tables, fixed-limit controls, Rules tab and "Learn the rules" mode), lessons, web build, README.
+Adding every game with a rules coach (plan: `~/.claude/plans/synchronous-watching-wind.md`). Done and tested: engine, evaluators, bots, simulator, the rules coach (`src/rules.c`), basic tips (`adviseBasic`) and the "Games & rules" glossary category. Still to do: the UI in `src/main.c` (game picker with tabs Board / Stud / Razz / Draw / Mixed, where Razz gets its own tab but is still a stud game underneath; stud/draw tables, fixed-limit controls, Rules tab and "Learn the rules" mode), lessons, README. The menu still offers only Hold'em and Omaha.

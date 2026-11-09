@@ -5,6 +5,8 @@
 #include "../src/arrange.h"
 #include "../src/pushfold.h"
 #include "../src/glossary.h"
+#include "../src/rules.h"
+#include "../src/basic.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -963,7 +965,7 @@ static void testGlossary(void) {
     // all the jargon the coach uses is explained
     const char *jargon[] = { "MDF", "SPR", "stack-to-pot", "c-bet", "continuation bet", "3-bet", "4-bet", "semi-bluff", "implied odds", "pot odds", "equity",
                              "outs", "the nuts", "overpair", "underpair", "top pair", "gutshot", "open-ended", "wrap", "squeeze", "isolate", "limpers",
-                             "push/fold", "Nash", "re-steal", "capped", "blockers", "multiway", "range", "position", "kicker", "trips", "set of", "rundowns",
+                             "push/fold", "Nash", "re-steal", "capped range", "blockers", "multiway", "range", "position", "kicker", "trips", "set of", "rundowns",
                              "danglers", "double-suited", "initiative", "barrel", "trap", "stab", "dry", "wet", "showdown", "value", "bluff",
                              "effective stack", "close the action", "defend", "VPIP", "PFR", "rule of 4 and 2", "flush draw", "polarized", "balanced",
                              "pot-limit", "min-raise", "side pot", "all-in", "heads-up", "out of position", "in position", "free card", "check behind",
@@ -972,6 +974,23 @@ static void testGlossary(void) {
         int f[4];
         CHECK(glossFind(jargon[i], f, 4) >= 1, "jargon '%s' has a glossary entry", jargon[i]);
     }
+    // ... and the jargon of the rules coach and the tips in the other games
+    const char *rules[] = { "ante", "bring-in", "brings in", "complete", "completing", "door card", "up card", "3rd street", "7th street", "open pair",
+                            "fixed limit", "small bet", "big bet", "the cap", "is capped", "stand pat", "standing pat", "stood pat", "throw away",
+                            "lowball", "lowest hand", "deuce-to-seven", "2-7", "ace-to-five", "wheel", "badugi", "Razz", "stud", "hi-lo", "high half",
+                            "low half", "8 or lower", "qualifying", "scoop", "quartered", "odd chip", "dead money", "are dead", "uncalled", "orbit",
+                            "HORSE", "8-Game", "short deck", "Big O", "triple draw", "play the board", "the option", "no limit", "pot limit", "hole cards" };
+    for (int i = 0; i < (int)(sizeof rules / sizeof rules[0]); i++) {
+        int f[4];
+        CHECK(glossFind(rules[i], f, 4) >= 1, "rules jargon '%s' has a glossary entry", rules[i]);
+    }
+    // fixed-limit "capped" is not a capped range, and a game name doesn't drag in look-alikes
+    int f0[4], n0 = glossFind("The betting is capped.", f0, 4);
+    CHECK(n0 == 1 && f0[0] == glossLookup("Cap"), "'capped' betting -> Cap (%d terms)", n0);
+    n0 = glossFind("They have a capped range.", f0, 4);
+    bool capHit = false;
+    for (int i = 0; i < n0; i++) capHit |= f0[i] == glossLookup("Cap");
+    CHECK(n0 >= 1 && f0[0] == glossLookup("Capped range") && !capHit, "'capped range' -> Capped range, not Cap");
     // whole words only: no false hits inside other words
     int f[8];
     CHECK(glossFind("upset settlers", f, 8) == 0, "'set' doesn't match inside words");
@@ -1435,6 +1454,237 @@ static void testMixed(void) {
           "8-Game: starts with 2-7 triple draw, then NL Hold'em and PLO at the end");
 }
 
+// ---------------------------------------------------------------- rules coach
+
+static bool textOk(const char *s, int size) {      // filled, not cut off by its buffer, printable ASCII (the UI font has nothing else)
+    int n = (int)strlen(s);
+    if (n == 0 || n >= size - 1 || strstr(s, "(null)")) return false;
+    for (const char *p = s; *p; p++) if (*p != '\n' && ((unsigned char)*p < 32 || (unsigned char)*p >= 127)) return false;
+    return true;
+}
+
+static const GameEvent *lastEvent(const Game *g, int type) {
+    for (int i = g->evSeq - 1; i >= 0 && i >= g->evSeq - MAXEV; i--) if (g->ev[i % MAXEV].type == type) return &g->ev[i % MAXEV];
+    return NULL;
+}
+
+static bool legalAct(const Legal *l, Action a, int nhole) {
+    if (l->draw) return a.type == A_DRAW && a.amount >= 0 && a.amount < 1 << nhole;
+    switch (a.type) {
+    case A_CHECK: return l->canCheck;
+    case A_CALL: return !l->canCheck;
+    case A_FOLD: return !l->canCheck && !l->bringIn;
+    case A_RAISE: return l->canRaise && a.amount >= l->minTo && a.amount <= l->maxTo;
+    default: return false;
+    }
+}
+
+static void testRulesCoach(void) {
+    printf("rules coach: rule sheets, comparisons, narration, showdowns\n");
+    static char b[8000];
+    for (int v = 0; v < V_COUNT; v++)
+        for (int lim = 0; lim < BL_COUNT; lim++) {
+            if (!(varInfo(v)->limits >> lim & 1)) continue;
+            int n = rulesSheet(v, lim, b, sizeof b);
+            CHECK(textOk(b, sizeof b) && n > 1200 && strstr(b, "GOAL\n") && strstr(b, "BETTING: ") && strstr(b, "SHOWDOWN\n"),
+                  "%s %s: complete rule sheet (%d chars)", varInfo(v)->shortName, limitShort(lim), n);
+        }
+    for (int m = MIX_HORSE; m < MIX_COUNT; m++) { int n = rulesMixedSheet(m, b, sizeof b); CHECK(textOk(b, sizeof b) && n > 300, "%s sheet", mixName(m)); }
+    // facts from Wikipedia the sheets must state
+    rulesSheet(V_SHORTDECK, BL_NOLIMIT, b, sizeof b);
+    CHECK(strstr(b, "FLUSH BEATS A FULL HOUSE") && strstr(b, "A-6-7-8-9"), "short deck: flush over full house, A-6-7-8-9 straight");
+    rulesSheet(V_RAZZ, BL_FIXED, b, sizeof b);
+    CHECK(strstr(b, "king of spades always brings in") && strstr(b, "5-4-3-2-A"), "razz: the king of spades brings in, the wheel is best");
+    rulesSheet(V_TD27, BL_FIXED, b, sizeof b);
+    CHECK(strstr(b, "7-5-4-3-2") && strstr(b, "A-2-3-4-5 is not a straight") && strstr(b, "three draws"), "2-7: 7-5-4-3-2 best, no wheel");
+    rulesSheet(V_BADUGI, BL_FIXED, b, sizeof b);
+    CHECK(strstr(b, "9-5-A") && strstr(b, "A-2-3-4"), "badugi: Wikipedia's example");
+    rulesSheet(V_OMAHA8, BL_FIXED, b, sizeof b);
+    CHECK(strstr(b, "EXACTLY TWO") && strstr(b, "8 or lower") && strstr(b, "scoop") && strstr(b, "different cards"), "omaha hi-lo: 2 + 3, 8 or better, scoop");
+    rulesSheet(V_STUD, BL_FIXED, b, sizeof b);
+    CHECK(strstr(b, "open pair") && strstr(b, "clubs, diamonds, hearts, spades") && strstr(b, "complete"), "stud: bring-in, suits, open pair");
+    rulesSheet(V_HOLDEM, BL_FIXED, b, sizeof b);
+    CHECK(strstr(b, "FIXED LIMIT") && strstr(b, "three raises") && strstr(b, "not burned"), "fixed limit: the cap; house rule: no burn cards");
+
+    // how two hands compare, in words
+    char c[200];
+    rulesCompare(V_HOLDEM, ev("Ah Ad Kc 7s 2d", 5), ev("As Ac Qh 7d 2c", 5), c, sizeof c);
+    CHECK(strstr(c, "kickers decide: King beats Queen") != NULL, "kicker: '%s'", c);
+    rulesCompare(V_HOLDEM, ev("Ah Kh 9h 5h 2h", 5), ev("Ad Qd 9d 5d 2d", 5), c, sizeof c);
+    CHECK(strstr(c, "top card matches, so the second-highest card decides: King beats Queen") != NULL, "flush vs flush: '%s'", c);
+    rulesCompare(V_HOLDEM, ev("9h 9d 9c 5h 2s", 5), ev("Kh Kd 5c 5d 2c", 5), c, sizeof c);
+    CHECK(strcmp(c, "Three of a Kind beats Two Pair") == 0, "categories: '%s'", c);
+    rulesCompare(V_SHORTDECK, evV(V_SHORTDECK, "Ah Kh 9h 7h 6h"), evV(V_SHORTDECK, "As Ac Ad 6c 6d"), c, sizeof c);
+    CHECK(strstr(c, "Flush beats Full House") && strstr(c, "short deck"), "short deck: '%s'", c);
+    rulesCompare(V_TD27, evV(V_TD27, "7c 5d 4h 3s 2c"), evV(V_TD27, "Ac 2d 3h 4s 5c"), c, sizeof c);
+    CHECK(strstr(c, "7 beats A") && strstr(c, "aces are high"), "2-7: 7-5-4-3-2 beats ace-high: '%s'", c);
+    rulesCompare(V_TD27, evV(V_TD27, "Kc 9d 8h 7s 5c"), evV(V_TD27, "6c 5d 4h 3s 2c"), c, sizeof c);
+    CHECK(strstr(c, "no pair beats a straight") != NULL, "2-7: a straight counts against you: '%s'", c);
+    rulesCompare(V_RAZZ, evV(V_RAZZ, "Kc Qd Jh 9s 8c"), evV(V_RAZZ, "2c 2d 3h 4s 5c"), c, sizeof c);
+    CHECK(strstr(c, "no pair beats one pair") != NULL, "razz: pairs are bad: '%s'", c);
+    rulesCompare(V_RAZZ, evV(V_RAZZ, "5c 4d 3h 2s Ac"), evV(V_RAZZ, "6c 4d 3h 2s Ac"), c, sizeof c);
+    CHECK(strstr(c, "5 beats 6") != NULL, "razz: the wheel beats a 6-low: '%s'", c);
+    rulesCompare(V_BADUGI, evV(V_BADUGI, "Ac 2d 3h Ks"), evV(V_BADUGI, "As 5d 9d 9h"), c, sizeof c);
+    CHECK(strcmp(c, "a 4-card hand beats any 3-card hand") == 0, "badugi sizes: '%s'", c);
+    rulesCompare(V_BADUGI, evV(V_BADUGI, "Ac 2d 7h 8s"), evV(V_BADUGI, "Ac 3d 7h 8s"), c, sizeof c);
+    CHECK(strstr(c, "top two cards match, so the next card decides: 2 beats 3") != NULL, "badugi: '%s'", c);
+
+    // stud: the bring-in, with the suit breaking a tie (the deck from testStud)
+    Game g;
+    RulesMemory mem;
+    char out[RULE_LEN], lines[12][RULE_LEN];
+    GameConfig cf = cfgN(3, V_STUD, BL_FIXED, 1000);
+    cf.sb = 5; cf.bb = 10;
+    gameSetup(&g, &cf);
+    g.button = 0;
+    presetDeck(&g, "Ah Ad As Kc Kd Ks 2d 2c Kh 2h 9c 3s");
+    gameNewHand(&g);
+    memset(&mem, 0, sizeof mem);
+    const GameEvent *e = lastEvent(&g, EV_BRINGIN);
+    CHECK(e && rulesNarrate(&g, e, &mem, out, sizeof out) && strstr(out, "lowest up card, the 2 of clubs") && strstr(out, "the suit decides") && strstr(out, "$3"),
+          "bring-in explained: '%s'", out);
+    rulesNarrate(&g, e, &mem, out, sizeof out);
+    CHECK(strlen(out) < 60 && strstr(out, "bring-in (the 2 of clubs)"), "second time it's short: '%s'", out);
+    int k = rulesYourTurn(&g, 2, lines, 12);
+    CHECK(k >= 2 && strstr(lines[1], "folding isn't allowed") && strstr(lines[1], "$3") && strstr(lines[1], "$10"), "your turn: bring in or complete: '%s'", k > 1 ? lines[1] : "");
+    act(&g, A_CALL, 0);
+    act(&g, A_RAISE, 0); act(&g, A_RAISE, 0); act(&g, A_RAISE, 0); act(&g, A_RAISE, 0);
+    e = lastEvent(&g, EV_CAP);
+    CHECK(e && rulesNarrate(&g, e, &mem, out, sizeof out) && strstr(out, "one bet and three raises"), "the cap explained: '%s'", out);
+    k = rulesYourTurn(&g, g.toAct, lines, 12);
+    bool capped = false;
+    for (int i = 0; i < k; i++) capped |= strstr(lines[i], "capped") != NULL;
+    CHECK(capped, "your turn: the betting is capped");
+    // razz: the highest up card brings in, kings are worst, spades the highest suit
+    cf.variant = V_RAZZ;
+    gameSetup(&g, &cf);
+    g.button = 0;
+    presetDeck(&g, "Ah Ad As 2c 2d 2s Kd Ks 3h 4h 5c 6s");
+    gameNewHand(&g);
+    e = lastEvent(&g, EV_BRINGIN);
+    CHECK(e && e->seat == 2 && rulesNarrate(&g, e, NULL, out, sizeof out) && strstr(out, "highest up card, the King of spades") && strstr(out, "spades are the highest suit"),
+          "razz bring-in: '%s'", out);
+
+    // hi-lo showdowns: split, no low, quartered (the decks from testHiLo)
+    GameConfig c2 = cfgN(2, V_OMAHA8, BL_FIXED, 1000);
+    gameSetup(&g, &c2);
+    g.button = 0;
+    gameNewHand(&g);
+    const char *h1[2] = { "Ah 2h Kc Kd", "Qs Qd Js Td" };
+    rig(&g, h1, "3s 5d 8c Qh 9h");
+    act(&g, A_CALL, 0);
+    playDown(&g);
+    k = rulesShowdown(&g, lines, 12);
+    CHECK(k == 3 && strstr(lines[0], "high half goes to") && strstr(lines[0], g.s[1].name) && strstr(lines[1], "Low half ($2)") && strstr(lines[1], g.s[0].name)
+          && strstr(lines[1], "only qualifying low"), "split pot explained: '%s' / '%s'", lines[0], k > 1 ? lines[1] : "");
+    gameSetup(&g, &c2);
+    g.button = 0;
+    gameNewHand(&g);
+    rig(&g, h1, "Ks Jd 9c Qh Th");
+    act(&g, A_CALL, 0);
+    playDown(&g);
+    k = rulesShowdown(&g, lines, 12);
+    CHECK(k == 2 && strstr(lines[0], "Nobody had a low") && strstr(lines[0], "whole pot"), "no low: '%s'", lines[0]);
+    GameConfig c3 = cfgN(3, V_OMAHA8, BL_FIXED, 1000);
+    gameSetup(&g, &c3);
+    g.button = 0;
+    gameNewHand(&g);
+    const char *h4[3] = { "Ah 2h Kc Kd", "As 2s 7c 7d", "Qs Qd Js Td" };
+    rig(&g, h4, "3s 5d 8c Qh 9h");
+    act(&g, A_CALL, 0); act(&g, A_CALL, 0); act(&g, A_CHECK, 0);
+    playDown(&g);
+    k = rulesShowdown(&g, lines, 12);
+    CHECK(k >= 2 && strstr(lines[1], "quartered") && strstr(lines[1], g.s[0].name) && strstr(lines[1], g.s[1].name), "quartered: '%s'", k > 1 ? lines[1] : "");
+}
+
+// one table of the rules-coach fuzz; counts problems into bad[]
+enum { RB_TEXT, RB_SILENT, RB_TURN, RB_TIPS, RB_SHOWDOWN, RB_ILLEGAL, RB_LOST, RB_N };
+static void rulesFuzzTable(Game *g, const GameConfig *cf, int hands, Rng *r, int *bad, int *decisions) {
+    char out[RULE_LEN], lines[12][RULE_LEN];
+    RulesMemory mem;
+    memset(&mem, 0, sizeof mem);
+    gameSetup(g, cf);
+    int seq = g->evSeq;
+    for (int h = 0; h < hands; h++) {
+        for (int i = 0; i < g->n; i++) if (g->s[i].stack <= 0) g->s[i].stack = cf->buyin;
+        gameNewHand(g);
+        for (int guard = 0; guard < 500; guard++) {
+            if (g->evSeq - seq > MAXEV) { bad[RB_LOST]++; seq = g->evSeq - MAXEV; }
+            for (; seq < g->evSeq; seq++) {
+                const GameEvent *e = &g->ev[seq % MAXEV];
+                if (rulesNarrate(g, e, &mem, out, sizeof out)) { if (!textOk(out, sizeof out) && bad[RB_TEXT]++ < 3) printf("    bad narration: '%s'\n", out); }
+                else if (e->type != EV_SHOWDOWN && e->type != EV_STREET && e->type != EV_SHORTALLIN) bad[RB_SILENT]++;
+            }
+            if (g->handOver) break;
+            if (g->toAct < 0) { gameAdvance(g); continue; }
+            int p = g->toAct;
+            Legal l;
+            gameLegal(g, &l);
+            Action a;
+            if (p == 0) {
+                (*decisions)++;
+                int k = rulesYourTurn(g, 0, lines, 12);
+                bool ok = k >= 2;
+                for (int i = 0; i < k; i++) ok = ok && textOk(lines[i], RULE_LEN);
+                if (!ok && bad[RB_TURN]++ < 3) printf("    bad your-turn (%d lines): '%s'\n", k, k > 0 ? lines[k - 1] : "");
+                Tips t;
+                adviseBasic(g, 0, &t, 40, r);
+                a = (Action){ t.act, t.amount };
+                ok = t.ntips >= 1 && textOk(t.head, sizeof t.head) && textOk(t.hand, sizeof t.hand) && legalAct(&l, a, g->s[0].nhole) && t.equity >= 0 && t.equity <= 1;
+                for (int i = 0; i < t.ntips; i++) ok = ok && textOk(t.tips[i], sizeof t.tips[0]);
+                if (!ok && bad[RB_TIPS]++ < 3) printf("    bad tips: act %d amt %d head '%s' hand '%s'\n", t.act, t.amount, t.head, t.hand);
+                if (rngInt(r, 3) == 0 && !l.draw) {      // sometimes something else, to reach odd spots (min-raises, all-ins)
+                    int x = rngInt(r, 10);
+                    a = (Action){ x < 2 ? A_FOLD : x < 6 ? (l.canCheck ? A_CHECK : A_CALL) : A_RAISE, x < 8 ? l.minTo : l.maxTo };
+                }
+            } else {
+                a = aiDecide(g, p, r);
+                if (!legalAct(&l, a, g->s[p].nhole) && bad[RB_ILLEGAL]++ < 3) printf("    illegal bot action: level %d type %d amt %d\n", g->s[p].level, a.type, a.amount);
+            }
+            gameAct(g, a);
+        }
+        int k = rulesShowdown(g, lines, 12);
+        bool ok = g->showdown ? k >= g->npots : k == 0;
+        for (int i = 0; i < k; i++) ok = ok && textOk(lines[i], RULE_LEN);
+        for (int i = 0; g->showdown && i < g->npots; i++) {          // every pot names its (bot) winners
+            int w = __builtin_ctz(g->pots[i].hiMask);
+            bool named = w == 0;
+            for (int j = 0; j < k; j++) named |= strstr(lines[j], g->s[w].name) != NULL;
+            ok = ok && named;
+        }
+        if (!ok && bad[RB_SHOWDOWN]++ < 3) printf("    bad showdown (%d lines, %d pots): '%s'\n", k, g->npots, k > 0 ? lines[0] : "");
+    }
+}
+
+static void testRulesFuzz(int hands) {
+    printf("rules coach fuzz: every game, structure and rotation (%d hands each)\n", hands);
+    Game *g = malloc(sizeof *g);
+    Rng r;
+    rngSeed(&r, 99);
+    static const char *what[RB_N] = { "narrations cut off or malformed", "events left unexplained", "malformed your-turn help", "malformed or illegal tips",
+                                      "malformed showdown explanations", "illegal bot actions", "events lost before the coach read them" };
+    for (int v = 0; v < V_COUNT + MIX_COUNT - 1; v++)
+        for (int lim = 0; lim < BL_COUNT; lim++) {
+            int mix = v >= V_COUNT ? v - V_COUNT + 1 : MIX_NONE;
+            if (mix ? lim > 0 : !(varInfo(v)->limits >> lim & 1)) continue;
+            int bad[RB_N] = { 0 }, dec = 0;
+            for (int tbl = 2; tbl <= 6; tbl += 2) {
+                GameConfig cf = cfgN(tbl, mix ? V_HOLDEM : v, lim, tbl == 4 ? 80 : 400);   // the 4-handed tables run short: all-ins, side pots
+                cf.mix = mix;
+                cf.sb = 5; cf.bb = 10; cf.buyin = tbl == 4 ? 80 : 400;
+                cf.human = 0; cf.levels[0] = LV_HUMAN;
+                for (int i = 1; i < tbl; i++) cf.levels[i] = 1 + i % 3;
+                cf.seed = 300 + v * 7 + lim + tbl;
+                rulesFuzzTable(g, &cf, hands / 3, &r, bad, &dec);
+            }
+            char nm[40];
+            snprintf(nm, sizeof nm, "%s%s%s", mix ? mixName(mix) : varInfo(v)->shortName, mix ? "" : " ", mix ? "" : limitShort(lim));
+            for (int i = 0; i < RB_N; i++) CHECK(bad[i] == 0, "%s: %d %s", nm, bad[i], what[i]);
+            CHECK(dec > 20, "%s: your turn came up (%d decisions)", nm, dec);
+        }
+    free(g);
+}
+
 // ---------------------------------------------------------------- every game and structure
 
 static void testFuzzAll(int hands) {
@@ -1523,6 +1773,8 @@ int main(void) {
     testHiLo();
     testMixed();
     testFuzzAll(2000);
+    testRulesCoach();
+    testRulesFuzz(150);
     testEquity();
     testCoachPreflop();
     testCoachPostflop();

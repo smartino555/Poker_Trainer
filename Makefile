@@ -16,7 +16,7 @@
 CC      ?= cc
 CFLAGS  ?= -O2 -std=gnu11 -Wall -Wextra -Wno-missing-field-initializers
 TARGET  := poker
-ENGINE  := src/variants.c src/cards.c src/range.c src/equity.c src/game.c src/strategy.c src/ai.c src/basic.c src/pushfold.c
+ENGINE  := src/variants.c src/cards.c src/range.c src/equity.c src/game.c src/strategy.c src/ai.c src/basic.c src/rules.c src/pushfold.c
 SRC     := src/main.c src/sound.c src/arrange.c src/glossary.c $(ENGINE)
 UNAME_S := $(shell uname -s)
 

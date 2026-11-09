@@ -2,7 +2,7 @@
 #pragma once
 #include <stdbool.h>
 
-enum { GC_BASICS, GC_POSITIONS, GC_PREFLOP, GC_POSTFLOP, GC_HANDS, GC_MATH, GC_THEORY, GC_PLAYERS, GC_APP, GC_N };
+enum { GC_BASICS, GC_POSITIONS, GC_PREFLOP, GC_POSTFLOP, GC_HANDS, GC_MATH, GC_THEORY, GC_PLAYERS, GC_GAMES, GC_APP, GC_N };
 
 typedef struct {
     const char *term;

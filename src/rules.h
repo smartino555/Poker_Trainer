@@ -6,8 +6,8 @@
 #define RULE_LEN 420
 
 // concepts the coach explains in full the first time, briefly after that (per game)
-enum { RC_BLINDS, RC_ANTES, RC_DEAL, RC_BRINGIN, RC_COMPLETE, RC_PREFLOP, RC_STREET, RC_ORDER, RC_OPENPAIR, RC_BIGBET, RC_CAP,
-       RC_ALLIN, RC_SHORTALLIN, RC_DRAWS, RC_PAT, RC_RESHUFFLE, RC_UNCALLED, RC_WALK, RC_RUNOUT, RC_N };
+enum { RC_BUTTON, RC_BLINDS, RC_ANTES, RC_DEAL, RC_BRINGIN, RC_COMPLETE, RC_PREFLOP, RC_STREET, RC_ORDER, RC_OPENPAIR, RC_BIGBET, RC_CAP,
+       RC_ALLIN, RC_SHORTALLIN, RC_DRAWS, RC_PAT, RC_DREW1, RC_DREW3, RC_RESHUFFLE, RC_UNCALLED, RC_WALK, RC_RUNOUT, RC_LAST, RC_N };
 typedef struct { bool seen[V_COUNT][RC_N]; } RulesMemory;
 
 // The full rules of a game (sections start with a line in capitals). Returns the length.

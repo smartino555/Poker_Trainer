@@ -24,6 +24,7 @@ static const char *M(int v) {
 static const VariantInfo *VI(const Game *g) { return varInfo(g->variant); }
 static const char *NM(const Game *g, int p) { return g->s[p].name; }
 static const char *V(const Game *g, int p, const char *you, const char *they) { return p == g->human ? you : they; }
+static const char *p2(const Game *g, int p) { return p == g->human ? "you" : g->s[p].name; }   // mid-sentence name
 static const char *POSS(const Game *g, int p) {
     static char buf[4][32];
     static int k = 0;
@@ -57,10 +58,12 @@ static void add(char *out, int n, const char *fmt, ...) {
     va_end(ap);
 }
 
-static void upList(const Game *g, int p, char *buf, int n) {
+static const char *SHORTR[13] = { "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A" };
+
+static void upList(const Game *g, int p, char *buf, int n) {      // "8-K-K"
     int up[MAXH], k = gameUpCards(g, p, up);
     buf[0] = 0;
-    for (int i = 0; i < k; i++) add(buf, n, "%s%s", i ? " " : "", RNAME[cardRank(up[i])]);
+    for (int i = 0; i < k; i++) add(buf, n, "%s%s", i ? "-" : "", SHORTR[cardRank(up[i])]);
 }
 
 static void showingName(const Game *g, int p, char *buf, int n) {
@@ -69,14 +72,16 @@ static void showingName(const Game *g, int p, char *buf, int n) {
     upList(g, p, cs, sizeof cs);
     if (g->variant == V_RAZZ) { snprintf(buf, n, "%s", cs); return; }
     char hn[64];
-    handName(evalHand(up, k), hn, sizeof hn);
-    if (handCat(evalHand(up, k)) == HC_HIGH) snprintf(buf, n, "%s (%s high)", cs, RNAME[handRank1(evalHand(up, k))]);
+    int v = evalHand(up, k);
+    handName(v, hn, sizeof hn);
+    if (handCat(v) == HC_HIGH) snprintf(buf, n, "%s (%s high)", cs, RNAME[handRank1(v)]);
     else snprintf(buf, n, "%s (%s)", cs, hn);
 }
 
 // ---------------------------------------------------------------- comparing two hands
 
 static const char *ORD[5] = { "highest", "second-highest", "third", "fourth", "fifth" };
+static const char *topN(int i) { static const char *T[5] = { "", "top card matches", "top two cards match", "top three cards match", "top four cards match" }; return T[i]; }
 
 void rulesCompare(int variant, int w, int l, char *buf, int n) {
     int rk = varInfo(variant)->rank;
@@ -118,8 +123,8 @@ void rulesCompare(int variant, int w, int l, char *buf, int n) {
             break;
         default:              // flush or high card: card by card from the top
             if (i == 0) snprintf(buf, n, "%s: the highest card decides, %s beats %s", cw == HC_FLUSH ? "both have a flush" : "no pair for either", rankName(a), rankName(b));
-            else snprintf(buf, n, "%s: the top %d card%s match, so the %s card decides: %s beats %s", cw == HC_FLUSH ? "both have a flush" : "no pair for either",
-                          i, i == 1 ? "" : "s", ORD[i], rankName(a), rankName(b));
+            else snprintf(buf, n, "%s: the %s, so the %s card decides: %s beats %s", cw == HC_FLUSH ? "both have a flush" : "no pair for either",
+                          topN(i), ORD[i], rankName(a), rankName(b));
             break;
         }
         return;
@@ -128,17 +133,19 @@ void rulesCompare(int variant, int w, int l, char *buf, int n) {
         bool a5 = rk == RK_LOW_A5;
         int kw = LOWTOP - w, kl = LOWTOP - l, cw = (kw >> 20) & 15, cl = (kl >> 20) & 15;
         static const char *LCAT[6] = { "no pair", "one pair", "two pair", "three of a kind", "a full house", "four of a kind" };
+        static const char *CAT27[9] = { "no pair", "one pair", "two pair", "three of a kind", "a straight", "a flush", "a full house", "four of a kind", "a straight flush" };
         if (cw != cl) {
             if (a5) snprintf(buf, n, "%s beats %s - in lowball, pairs count against you", LCAT[cw], LCAT[cl]);
-            else snprintf(buf, n, "%s beats %s - in 2-7, pairs, straights and flushes all count against you", catName(cw), catName(cl));
+            else snprintf(buf, n, "%s beats %s - in 2-7, pairs, straights and flushes all count against you", CAT27[cw], CAT27[cl]);
             return;
         }
         int i = 0, a = 0, b = 0;
         for (; i < 5; i++) { a = kw >> (16 - 4 * i) & 15; b = kl >> (16 - 4 * i) & 15; if (a != b) break; }
         if (i == 5) { snprintf(buf, n, "the hands are the same - a tie"); return; }
         char ca = a5 ? LOWCH[a] : RANKCH[a], cb = a5 ? LOWCH[b] : RANKCH[b];
-        if (i == 0) snprintf(buf, n, "lows compare from the top card down: %c beats %c (lower is better%s)", ca, cb, a5 ? "" : "; aces are high");
-        else snprintf(buf, n, "the top %d card%s match, so the %s card decides: %c beats %c (lower is better)", i, i == 1 ? "" : "s", ORD[i], ca, cb);
+        if (i == 0 && cw > 0) snprintf(buf, n, "both have %s; the lower one wins: %c beats %c", a5 ? LCAT[cw] : CAT27[cw], ca, cb);
+        else if (i == 0) snprintf(buf, n, "lows compare from the top card down: %c beats %c (lower is better%s)", ca, cb, a5 ? "" : "; aces are high");
+        else snprintf(buf, n, "the %s, so the %s card decides: %c beats %c (lower is better)", topN(i), ORD[i], ca, cb);
         return;
     }
     // badugi
@@ -148,7 +155,7 @@ void rulesCompare(int variant, int w, int l, char *buf, int n) {
         int a = kw >> (12 - 4 * i) & 15, b = kl >> (12 - 4 * i) & 15;
         if (a == b) continue;
         if (i == 0) snprintf(buf, n, "both are %d-card hands; the highest card decides: %c beats %c (lower is better)", sw, LOWCH[a], LOWCH[b]);
-        else snprintf(buf, n, "the top %d card%s match, so the next card decides: %c beats %c", i, i == 1 ? "" : "s", LOWCH[a], LOWCH[b]);
+        else snprintf(buf, n, "the %s, so the next card decides: %c beats %c", topN(i), LOWCH[a], LOWCH[b]);
         return;
     }
     snprintf(buf, n, "the hands are the same - a tie");
@@ -271,7 +278,8 @@ int rulesSheet(int variant, int limit, char *buf, int n) {
     }
     structureText(limit, variant, buf, n);
     add(buf, n, "SHOWDOWN\nIf more than one player is left after the last betting round, the hands are shown and the best wins. If a bet isn't called, the bettor wins without showing. "
-                "A player who is all-in can only win as much from each opponent as they put in themselves; bets beyond that go into a side pot for the others.");
+                "A player who is all-in can only win as much from each opponent as they put in themselves; bets beyond that go into a side pot for the others.\n\n"
+                "THIS TABLE\nCards are not burned (thrown away unseen) before each street or draw as they are in a casino; it doesn't change the odds.");
     return (int)strlen(buf);
 }
 
@@ -306,7 +314,7 @@ bool rulesNarrate(const Game *g, const GameEvent *e, RulesMemory *mem, char *out
         return true;
     case EV_HAND:
         put(out, n, "Hand #%d of %s %s. %s %s the dealer button%s.", e->a, limitName(g->limit), vi->name, NM(g, g->button), V(g, g->button, "have", "has"),
-            vi->family == FAM_STUD ? " (in stud it only breaks ties for who acts first)" : "");
+            vi->family == FAM_STUD && first(mem, g, RC_BUTTON) ? " (in stud it only breaks ties for who acts first)" : "");
         return true;
     case EV_BLINDS: {
         int sb = p, bb = e->a;
@@ -368,7 +376,8 @@ bool rulesNarrate(const Game *g, const GameEvent *e, RulesMemory *mem, char *out
         int r = e->a;
         const char *nm = vi->streets[r < vi->rounds ? r : 0];
         if (p < 0) {
-            if (first(mem, g, RC_RUNOUT)) put(out, n, "%s: at most one player can still bet - everyone else is all-in. So there's no more betting: the rest of the cards are dealt and the hands are shown.", nm);
+            if (first(mem, g, RC_RUNOUT)) put(out, n, "%s: at most one player can still bet - everyone else is all-in. So there's no more betting: %s.", nm,
+                                             vi->family == FAM_DRAW ? "any draws left still happen, then the hands are shown" : "the rest of the cards are dealt and the hands are shown");
             else put(out, n, "%s: no more betting possible.", nm);
             return true;
         }
@@ -376,17 +385,21 @@ bool rulesNarrate(const Game *g, const GameEvent *e, RulesMemory *mem, char *out
         if (vi->family == FAM_STUD) {
             if (r == 0) return false;          // the bring-in explains 3rd street
             showingName(g, e->b, sh, sizeof sh);
-            if (r == 4) put(out, n, "7th street (the river): the last card comes face DOWN. Everyone has seven cards - three down, four up - and plays the best five. %s %s first.", NM(g, p), V(g, p, "act", "acts"));
+            if (r == 4 && first(mem, g, RC_LAST)) put(out, n, "7th street (the river): the last card comes face DOWN. Everyone has seven cards - three down, four up - and plays the best five. %s %s first.", NM(g, p), V(g, p, "act", "acts"));
+            else if (r == 4) put(out, n, "7th street (face down): %s %s first.", NM(g, p), V(g, p, "act", "acts"));
             else if (first(mem, g, RC_ORDER))
-                put(out, n, "%s: one more card face up for everyone still in. From now on the %s hand showing acts first: %s, with %s. (Straights and flushes don't count until five cards are up.)",
-                    nm, g->variant == V_RAZZ ? "lowest" : "best", NM(g, e->b), sh);
+                put(out, n, "%s: one more card face up for everyone still in. From now on the %s hand showing acts first: %s, with %s. %s",
+                    nm, g->variant == V_RAZZ ? "lowest" : "best", NM(g, e->b), sh,
+                    g->variant == V_RAZZ ? "(Pairs showing are bad; straights and flushes never count in Razz.)" : "(Only pairs and high cards count: straights and flushes need five cards.)");
             else put(out, n, "%s: %s %s first (%s showing: %s).", nm, NM(g, p), V(g, p, "act", "acts"), g->variant == V_RAZZ ? "lowest" : "best", sh);
             if (p != e->b) add(out, n, " %s is all-in, so the next player starts.", NM(g, e->b));
         } else if (vi->family == FAM_DRAW) {
             if (r == 0) {
                 if (!first(mem, g, RC_PREFLOP)) return false;
                 put(out, n, "Betting before the draw: the player left of the big blind acts first (%s). Fold, call the big blind, or raise.", NM(g, p));
-            } else put(out, n, "Betting after the %s%sdraw: the first player left of the button acts first (%s); the button acts last.", drawWord(r - 1, vi->draws), vi->draws == 1 ? "" : " ", NM(g, p));
+            } else if (first(mem, g, RC_STREET))
+                put(out, n, "Betting after the %s%sdraw: the first player left of the button acts first (%s); the button acts last.", drawWord(r - 1, vi->draws), vi->draws == 1 ? "" : " ", NM(g, p));
+            else put(out, n, "After the %s%sdraw: %s %s first.", drawWord(r - 1, vi->draws), vi->draws == 1 ? "" : " ", NM(g, p), V(g, p, "act", "acts"));
         } else {
             if (r == 0) {
                 if (!first(mem, g, RC_PREFLOP)) { put(out, n, "Preflop: %s %s first.", NM(g, p), V(g, p, "act", "acts")); return true; }
@@ -412,7 +425,7 @@ bool rulesNarrate(const Game *g, const GameEvent *e, RulesMemory *mem, char *out
         return true;
     case EV_CAP:
         if (first(mem, g, RC_CAP))
-            put(out, n, "That's the cap: fixed limit allows one bet and three raises per round. Everyone else can now only call or fold. (With only two players in the hand there's no cap.)");
+            put(out, n, "That's the cap: fixed limit allows one bet and three raises per round. Everyone else can now only call or fold. (When a round starts with only two players, there's no cap.)");
         else put(out, n, "The betting is capped.");
         return true;
     case EV_ALLIN:
@@ -437,8 +450,8 @@ bool rulesNarrate(const Game *g, const GameEvent *e, RulesMemory *mem, char *out
             if (e->a == 0) put(out, n, "You stand pat.");
             else put(out, n, "You throw away %d and draw %d new card%s.", e->a, e->a, e->a == 1 ? "" : "s");
         } else if (e->a == 0) put(out, n, "%s stands pat%s", NM(g, p), first(mem, g, RC_PAT) ? " - keeping every card usually means a finished hand (or a bluff)." : ".");
-        else if (e->a == 1) put(out, n, "%s draws 1 - probably one card away from a good hand.", NM(g, p));
-        else put(out, n, "%s draws %d%s", NM(g, p), e->a, e->a >= 3 ? " - a weak hand, starting over." : ".");
+        else if (e->a == 1) put(out, n, "%s draws 1%s", NM(g, p), first(mem, g, RC_DREW1) ? " - probably one card away from a good hand." : ".");
+        else put(out, n, "%s draws %d%s", NM(g, p), e->a, e->a >= 3 && first(mem, g, RC_DREW3) ? " - a weak hand, starting over." : ".");
         return true;
     case EV_RESHUFFLE:
         if (first(mem, g, RC_RESHUFFLE))
@@ -449,7 +462,7 @@ bool rulesNarrate(const Game *g, const GameEvent *e, RulesMemory *mem, char *out
     case EV_UNCALLED:
         if (first(mem, g, RC_UNCALLED))
             put(out, n, "Nobody matched all of %s bet, so the extra %s goes back to %s: you can only win from each player as much as they can put in.", POSS(g, p), M(e->a), p == g->human ? "you" : NM(g, p));
-        else put(out, n, "%s uncalled goes back to %s.", M(e->a), p == g->human ? "you" : NM(g, p));
+        else put(out, n, "The uncalled %s goes back to %s.", M(e->a), p2(g, p));
         return true;
     case EV_WALK:
         if (first(mem, g, RC_WALK))
@@ -474,7 +487,7 @@ int rulesYourTurn(const Game *g, int p, char out[][RULE_LEN], int max) {
     describeHandV(g, p, hand, sizeof hand);
     if (hand[0] && k < max) {
         put(out[k], RULE_LEN, "You hold: %s.", hand);
-        if (vi->omaha && g->nboard >= 3) add(out[k], RULE_LEN, " (Exactly two of your cards + three from the board.)");
+        if (vi->omaha && g->nboard >= 3) add(out[k], RULE_LEN, " (Exactly two of your cards and three from the board.)");
         if (vi->rank == RK_LOW_27) add(out[k], RULE_LEN, " (Lowest wins; aces are high; straights and flushes count against you.)");
         if (vi->rank == RK_LOW_A5) add(out[k], RULE_LEN, " (Lowest wins; aces are low.)");
         if (vi->rank == RK_BADUGI) add(out[k], RULE_LEN, " (Only cards of different suits and ranks count.)");
@@ -493,8 +506,9 @@ int rulesYourTurn(const Game *g, int p, char out[][RULE_LEN], int max) {
         return k;
     }
     char opt[RULE_LEN];
-    if (l.canCheck) put(opt, sizeof opt, "Nobody has bet this round, so you may check (bet nothing)%s", l.canRaise ? "" : ".");
-    else put(opt, sizeof opt, "You face a bet: fold (give up the hand), call %s%s", M(l.toCall), l.canRaise ? "" : ".");
+    if (l.canCheck && g->curBet > 0) put(opt, sizeof opt, "Everyone just called your big blind, so you have 'the option': check (the blind already counts as your bet)%s", l.canRaise ? "" : ".");
+    else if (l.canCheck) put(opt, sizeof opt, "Nobody has bet this round, so you may check (bet nothing)%s", l.canRaise ? "" : ".");
+    else put(opt, sizeof opt, "You face a bet: fold (drop out of the hand), call %s%s", M(l.toCall), l.canRaise ? "" : ".");
     if (l.canRaise) {
         const char *verb = g->curBet == 0 ? "bet" : g->curBet < g->betUnit && gameIsFixed(g) ? "complete to" : "raise to";
         if (l.maxTo > l.minTo && gameIsFixed(g)) add(opt, sizeof opt, ", or bet %s or %s.", M(l.minTo), M(l.maxTo));
@@ -507,11 +521,13 @@ int rulesYourTurn(const Game *g, int p, char out[][RULE_LEN], int max) {
             int left = gameCapLeft(g);
             put(out[k], RULE_LEN, "Fixed limit: every bet and raise on this round is %s (the %s bet).", M(g->betUnit), g->betUnit == g->bigBet ? "big" : "small");
             if (g->openPair && g->curBet == 0) add(out[k], RULE_LEN, " An open pair is showing, so the big bet (%s) is allowed too.", M(g->bigBet));
-            if (left < 0) add(out[k], RULE_LEN, " Only two players are in, so there is no cap on raises.");
+            if (left < 0) add(out[k], RULE_LEN, " The round started with only two players, so there is no cap on raises.");
             else if (left == 0) add(out[k], RULE_LEN, " The betting is capped - no more raises this round.");
-            else add(out[k], RULE_LEN, " %d more raise%s allowed before the cap.", g->curBet == 0 ? left - 1 : left, (g->curBet == 0 ? left - 1 : left) == 1 ? " is" : "s are");
+            else if (g->nBets == 0) add(out[k], RULE_LEN, " The round allows a bet and three raises before the cap.");
+            else add(out[k], RULE_LEN, " %d more raise%s allowed before the cap.", left, left == 1 ? " is" : "s are");
         } else if (g->limit == BL_POTLIMIT)
-            put(out[k], RULE_LEN, "Pot limit: the most you can %s is the size of the pot after your call (%s here). The least is %s.", g->curBet ? "raise to" : "bet", M(l.maxTo), M(l.minTo));
+            put(out[k], RULE_LEN, g->curBet ? "Pot limit: the most you can raise to is your call plus the pot after it (%s here). The least is %s."
+                                             : "Pot limit: the most you can bet is the size of the pot (%s here). The least is %s.", M(l.maxTo), M(l.minTo));
         else
             put(out[k], RULE_LEN, "No limit: you can %s any amount from %s up to all your chips (%s). A raise must be at least as big as the last bet or raise.", g->curBet ? "raise to" : "bet", M(l.minTo), M(l.maxTo));
         k++;
@@ -527,7 +543,9 @@ int rulesYourTurn(const Game *g, int p, char out[][RULE_LEN], int max) {
     if (!l.canCheck && l.toCall >= s->stack && k < max)
         put(out[k++], RULE_LEN, "Calling puts you all-in. You can't be forced out after that, but you can only win as much from each player as you put in.");
     if (k < max) {
-        if (vi->family == FAM_STUD) put(out[k++], RULE_LEN, "Order in stud: the bring-in starts 3rd street; after that the best hand showing%s acts first each round.", g->variant == V_RAZZ ? " (lowest, in Razz)" : "");
+        if (vi->family == FAM_STUD) {
+            if (g->street == 0) put(out[k++], RULE_LEN, "Order in stud: the bring-in starts 3rd street; after that the %s hand showing acts first each round.", g->variant == V_RAZZ ? "lowest" : "best");
+        }
         else if (vi->family == FAM_DRAW && drawsLeft(g, p) > 0) put(out[k++], RULE_LEN, "Draws still to come: %d.", drawsLeft(g, p));
         else if (vi->family == FAM_BOARD && g->street < ST_RIVER) put(out[k++], RULE_LEN, "Still to come: %s.", g->street == 0 ? "the flop, the turn and the river" : g->street == 1 ? "the turn and the river" : "the river");
     }
@@ -541,7 +559,7 @@ static void names(const Game *g, int mask, char *buf, int n) {
     int cnt = __builtin_popcount(mask), i = 0;
     for (int q = 0; q < g->n; q++) {
         if (!(mask >> q & 1)) continue;
-        add(buf, n, "%s%s", i == 0 ? "" : i == cnt - 1 ? " and " : ", ", NM(g, q));
+        add(buf, n, "%s%s", i == 0 ? "" : i == cnt - 1 ? " and " : ", ", p2(g, q));
         i++;
     }
 }
@@ -571,18 +589,19 @@ int rulesShowdown(const Game *g, char out[][RULE_LEN], int max) {
         else snprintf(label, sizeof label, "Side pot %d (%s)", i, M(pr->amount));
         char *o = out[k++];
         o[0] = 0;
-        if (g->npots > 1) { names(g, pr->eligible, who, sizeof who); add(o, RULE_LEN, "%s - only %s could win it. ", label, who); }
+        if (g->npots > 1) { names(g, pr->eligible, who, sizeof who); add(o, RULE_LEN, "%s, which only %s could win: ", label, who); }
         else add(o, RULE_LEN, "%s: ", label);
         int hw = __builtin_ctz(pr->hiMask);
         handNameV(g->variant, g->s[hw].value, hn, sizeof hn);
         names(g, pr->hiMask, who, sizeof who);
-        const char *half = split && pr->loAmt ? "high half" : "";
-        if (__builtin_popcount(pr->hiMask) > 1)
-            add(o, RULE_LEN, "%s%s%s split between %s, who all have %s.", half, half[0] ? " " : "", half[0] ? "is" : "It's", who, hn);
+        bool halves = split && pr->loAmt;
+        int nw = __builtin_popcount(pr->hiMask);
+        if (nw > 1)
+            add(o, RULE_LEN, "%s split between %s, who %s have %s.", halves ? "the high half is" : "it's", who, nw == 2 ? "both" : "all", hn);
         else {
             int rw, rv = runnerUp(g, pr->eligible, g->s[hw].value, false, &rw);
-            add(o, RULE_LEN, "%s%s%s %s with %s", half[0] ? "the " : "", half, half[0] ? " goes to" : "", NM(g, hw), hn);
-            if (!half[0]) add(o, RULE_LEN, " - %s %s", NM(g, hw), V(g, hw, "win", "wins"));
+            if (halves) add(o, RULE_LEN, "the high half goes to %s with %s", p2(g, hw), hn);
+            else add(o, RULE_LEN, "%s %s with %s", NM(g, hw), V(g, hw, "win", "wins"), hn);
             if (rw >= 0) {
                 char rn[64];
                 handNameV(g->variant, rv, rn, sizeof rn);
@@ -603,7 +622,7 @@ int rulesShowdown(const Game *g, char out[][RULE_LEN], int max) {
                     add(lo, RULE_LEN, "Low half (%s): %s tie with %s and share it - each gets a quarter of this pot or less ('quartered').", M(pr->loAmt), who, ln);
                 else {
                     int rw, rv = runnerUp(g, pr->eligible, g->s[lw].low, true, &rw);
-                    add(lo, RULE_LEN, "Low half (%s): %s with %s", M(pr->loAmt), NM(g, lw), ln);
+                    add(lo, RULE_LEN, "Low half (%s): %s %s it with %s", M(pr->loAmt), p2(g, lw), V(g, lw, "win", "wins"), ln);
                     if (rw >= 0 && rv > 0) {
                         char rn[40];
                         lowName(rv, rn, sizeof rn);
@@ -611,7 +630,7 @@ int rulesShowdown(const Game *g, char out[][RULE_LEN], int max) {
                         add(lo, RULE_LEN, ". Against %s %s: %s.", POSS(g, rw), rn, cmp);
                     } else add(lo, RULE_LEN, " - the only qualifying low.");
                 }
-                if (pr->hiMask == pr->loMask && __builtin_popcount(pr->hiMask) == 1) add(lo, RULE_LEN, " Best high AND best low: %s %s the whole pot.", NM(g, lw), V(g, lw, "scoop", "scoops"));
+                if (pr->hiMask == pr->loMask && __builtin_popcount(pr->hiMask) == 1) add(lo, RULE_LEN, " Best high AND best low: %s %s the whole pot.", p2(g, lw), V(g, lw, "scoop", "scoops"));
                 if (pr->amount % 2) add(lo, RULE_LEN, " The pot was odd, so the extra chip went to the high half.");
             }
         }
